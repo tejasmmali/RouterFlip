@@ -27,7 +27,7 @@ import { existsSync } from 'node:fs';
 import { claudeConfigDir, claudeSettingsFile } from '../core/paths.ts';
 import { backupFile, pruneBackups, readTextIfExists, writeJsonAtomic } from '../core/fsx.ts';
 import { nowIso } from '../core/id.ts';
-import { AUTH_ENV_VARS, type Activation, type Router } from '../core/schema.ts';
+import { AUTH_ENV_VARS, type Account, type Activation, type Router } from '../core/schema.ts';
 import { RouterFlipError } from '../errors.ts';
 import { logger } from '../logger.ts';
 import { run } from '../util/exec.ts';
@@ -155,11 +155,14 @@ class ClaudeCodeProvider implements Provider {
   }
 
   /** Command written to `apiKeyHelper`, or undefined when unavailable. */
-  helperCommand(router: Router): string | undefined {
+  helperCommand(router: Router, account?: Account): string | undefined {
     const executable = which('routerflip') ?? which('rflip');
     if (!executable) return undefined;
+    // The account is named explicitly so the helper keeps serving the credential
+    // that was chosen here, even if the selected account changes later.
+    const target = account ? ` --account ${account.id}` : '';
     // Quoted so a path containing spaces still parses as one argument.
-    return `"${executable}" credential ${router.id}`;
+    return `"${executable}" credential ${router.id}${target}`;
   }
 
   applyPermanent(router: Router, apiKey: string, options: ApplyOptions): ApplyResult {
@@ -170,7 +173,7 @@ class ClaudeCodeProvider implements Provider {
     let strategy: PermanentStrategy = options.strategy ?? 'env';
     let helper: string | undefined;
     if (strategy === 'helper') {
-      helper = this.helperCommand(router);
+      helper = this.helperCommand(router, options.account);
       if (!helper) strategy = 'env'; // documented fallback; caller reports it
     }
 
@@ -288,8 +291,14 @@ function restoreSource(backupPath: string): Settings | undefined {
 
 export const claudeCode: Provider = new ClaudeCodeProvider();
 
-/** Descriptive record of what an activation touched. Used by `status`/`doctor`. */
-export function activationFrom(router: Router, result: ApplyResult): Activation {
+/**
+ * Descriptive record of what an activation touched. Used by `status`/`doctor`.
+ *
+ * `account` is recorded by name as well as by id: `current` has to be able to
+ * say which account is live without loading config.json, and an id alone is not
+ * something a person recognises.
+ */
+export function activationFrom(router: Router, result: ApplyResult, account?: Account): Activation {
   return {
     routerId: router.id,
     routerName: router.name,
@@ -298,6 +307,7 @@ export function activationFrom(router: Router, result: ApplyResult): Activation 
     targetFile: result.targetFile,
     managedKeys: [...result.managedKeys],
     preexisting: result.preexisting,
+    ...(account ? { accountId: account.id, accountName: account.name } : {}),
     ...(result.originBackup ? { originBackup: result.originBackup } : {}),
     ...(result.backup ? { lastBackup: result.backup } : {}),
   };

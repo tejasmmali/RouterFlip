@@ -10,7 +10,7 @@
  * Keeping those separate is what makes temporary mode risk-free: it only ever
  * uses `envFor`, which touches nothing on disk.
  */
-import type { Activation, ProviderId, Router } from '../core/schema.ts';
+import type { Account, Activation, ProviderId, Router } from '../core/schema.ts';
 
 /** Result of looking for the provider's executable on PATH. */
 export interface ProviderDetection {
@@ -47,6 +47,12 @@ export interface ApplyOptions {
   readonly backupsDir: string;
   /** How many backups of the provider config to keep. */
   readonly backupRetention?: number;
+  /**
+   * The account whose credential is being applied. Only the helper strategy
+   * needs it — the command it writes has to name the account, or a later
+   * `use --account` would silently keep serving the old key.
+   */
+  readonly account?: Account;
 }
 
 /** What the provider's persistent configuration currently says. */
@@ -128,6 +134,9 @@ export interface Provider {
    * secret stay in the OS credential store. `undefined` means the key would have
    * to be written into the config file instead. Optional: a provider with no
    * helper mechanism simply omits it.
+   *
+   * `account` names which of the router's credentials to fetch; omitted, the
+   * router's selected account is used at call time.
    */
-  helperCommand?(router: Router): string | undefined;
+  helperCommand?(router: Router, account?: Account): string | undefined;
 }

@@ -11,7 +11,7 @@
  */
 import { paths } from '../core/paths.ts';
 import { loadState, saveState } from '../core/store.ts';
-import type { Activation, Router } from '../core/schema.ts';
+import type { Account, Activation, Router } from '../core/schema.ts';
 import { logger } from '../logger.ts';
 import { activationFrom } from '../providers/claude-code.ts';
 import type { ApplyResult, ClearResult, PermanentStrategy, Provider } from '../providers/types.ts';
@@ -22,6 +22,8 @@ export interface ApplyPermanentInput {
   readonly provider: Provider;
   readonly strategy?: PermanentStrategy;
   readonly backupRetention?: number;
+  /** The account `apiKey` came from, so the record names it and the helper fetches it. */
+  readonly account?: Account;
 }
 
 export interface ApplyPermanentOutcome {
@@ -47,10 +49,11 @@ export function applyPermanent(input: ApplyPermanentInput): ApplyPermanentOutcom
     backupsDir,
     strategy: requested,
     ...(input.backupRetention === undefined ? {} : { backupRetention: input.backupRetention }),
+    ...(input.account ? { account: input.account } : {}),
     ...(previous && previous.provider === input.router.provider ? { previous } : {}),
   });
 
-  const activation = activationFrom(input.router, result);
+  const activation = activationFrom(input.router, result, input.account);
   const state = loadState();
   saveState({ ...state, activation, lastUsedRouterId: input.router.id });
   logger.debug(`permanent activation recorded for ${input.router.id}`);

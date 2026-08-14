@@ -20,7 +20,13 @@ export async function deleteCommand(ctx: AppContext, target?: Router): Promise<C
 
   const details = [
     `Base URL: ${view.baseUrl}`,
-    view.hasKey ? 'Its API key will be removed from your credential store.' : 'No stored key to remove.',
+    // Every account's key goes with the router, so say how many rather than
+    // implying there is only ever one.
+    view.accountCount > 1
+      ? `All ${view.accountCount} accounts, and every key they store, will be removed from your credential store.`
+      : view.hasKey
+        ? 'Its API key will be removed from your credential store.'
+        : 'No stored key to remove.',
     ...(isPermanent ? ['It is currently applied to Claude Code — that will be reverted too.'] : []),
   ];
 

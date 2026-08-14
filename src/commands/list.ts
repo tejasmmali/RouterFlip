@@ -38,6 +38,11 @@ export async function listCommand(ctx: AppContext): Promise<CommandResult> {
 
   const active = views.find((view) => view.isActive);
   const count = `${views.length} router${views.length === 1 ? '' : 's'}`;
-  note(`  ${t.muted(count)}${active ? `${t.muted(' · current: ')}${t.text(active.name)}` : t.muted(' · none selected')}`);
+  // The account is named only when the current router has more than one, so the
+  // summary line stays a single short sentence for everyone else.
+  const account = active && active.accountCount > 1 && active.activeAccountName ? t.dim(` (${active.activeAccountName})`) : '';
+  note(
+    `  ${t.muted(count)}${active ? `${t.muted(' · current: ')}${t.text(active.name)}${account}` : t.muted(' · none selected')}`,
+  );
   return 0;
 }

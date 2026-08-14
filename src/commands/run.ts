@@ -8,7 +8,7 @@
 import type { AppContext } from '../context.ts';
 import type { Router } from '../core/schema.ts';
 import { activateTemporary } from './use.ts';
-import { pickRouter, routerArg, type CommandResult } from './shared.ts';
+import { accountArg, pickRouter, routerArg, type CommandResult } from './shared.ts';
 
 /** The router to run: `-r name` first, then the current one, then a prompt. */
 async function targetRouter(ctx: AppContext): Promise<Router> {
@@ -21,5 +21,9 @@ async function targetRouter(ctx: AppContext): Promise<Router> {
 
 export async function runCommand(ctx: AppContext): Promise<CommandResult> {
   const router = await targetRouter(ctx);
-  return activateTemporary(ctx, router, ctx.rest);
+  // This command is the "right now" path, so it never asks which account: the
+  // remembered selection is used unless `--account` names another one.
+  const named = accountArg(ctx);
+  const account = named === undefined ? ctx.service.activeAccountOf(router) : ctx.service.resolveAccount(router, named);
+  return activateTemporary(ctx, router, ctx.rest, account);
 }

@@ -12,6 +12,7 @@ import { checkUrl } from '../core/url.ts';
 import { maskSecret } from '../core/mask.ts';
 import { loadState } from '../core/store.ts';
 import { AUTH_ENV_VARS } from '../core/schema.ts';
+import { credentialRefOf, credentialRefsOf } from '../core/accounts.ts';
 import type { RouterService } from '../core/routers.ts';
 import type { Credentials } from '../credentials/index.ts';
 import type { Provider } from '../providers/types.ts';
@@ -150,20 +151,34 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
       hint: 'Add one with `routerflip add`.',
     });
   } else {
-    const presence = await credentials.presence(routers.map((router) => router.credentialRef));
+    // Every account's ref, in one batch: a router's own ref is no longer the only
+    // credential it can have, and after the first account is deleted it may hold
+    // none at all.
+    const presence = await credentials.presence(routers.flatMap((router) => [...credentialRefsOf(router)]));
     for (const router of routers) {
-      const hasKey = presence.get(router.credentialRef) === true;
+      const hasKey = presence.get(credentialRefOf(router)) === true;
       const url = checkUrl(router.baseUrl);
       const problems: string[] = [];
-      if (!hasKey) problems.push('no stored API key');
+      // A router with no accounts has no key by definition; saying both would be noise.
+      if (router.accounts.length === 0) problems.push('no accounts');
+      else if (!hasKey) problems.push('no stored API key');
+      const keyless = router.accounts.filter((account) => presence.get(account.credentialRef) !== true).length;
+      if (router.accounts.length > 1 && keyless > 0) {
+        problems.push(`${keyless} of ${router.accounts.length} accounts have no stored key`);
+      }
       if (!url.ok) problems.push(url.error);
       else if (url.value.isInsecure) problems.push('uses plain http://');
       const active = service.activeId === router.id ? ' (active)' : '';
+      const broken = router.accounts.length === 0 || !hasKey || !url.ok;
       routerChecks.push({
         label: `${router.name}${active}`,
-        status: !hasKey || !url.ok ? 'fail' : problems.length > 0 ? 'warn' : 'ok',
+        status: broken ? 'fail' : problems.length > 0 ? 'warn' : 'ok',
         detail: problems.length > 0 ? `${router.baseUrl} — ${problems.join('; ')}` : router.baseUrl,
-        ...(hasKey ? {} : { hint: `Run \`routerflip edit ${router.name}\` to store its key.` }),
+        ...(router.accounts.length === 0
+          ? { hint: `Add an account with \`routerflip accounts ${router.name} add\`.` }
+          : hasKey
+            ? {}
+            : { hint: `Run \`routerflip edit ${router.name}\` to store its key.` }),
       });
     }
   }

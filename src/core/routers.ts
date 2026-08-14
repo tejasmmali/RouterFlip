@@ -4,14 +4,36 @@
  * The single place that mutates config.json, so every rule the CLI promises —
  * unique names, normalized URLs, trimmed input, keys stored out-of-band — is
  * enforced once rather than in each command.
+ *
+ * A router owns a base URL and a list of accounts; each account owns one key in
+ * the OS credential store. Every read that needs a key goes through
+ * `credentialRefOf`, so "which account?" is answered in exactly one place and a
+ * router with no accounts keeps behaving as it did before they existed.
  */
 import { RouterFlipError } from '../errors.ts';
 import { logger } from '../logger.ts';
 import type { Credentials } from '../credentials/index.ts';
+import {
+  FIRST_ACCOUNT_NAME,
+  accountLabel,
+  activeAccount,
+  credentialRefOf,
+  credentialRefsOf,
+  findAccount,
+  nextAccountIdentity,
+} from './accounts.ts';
 import { credentialRefFor, normalizeName, nowIso, sameName, uniqueId } from './id.ts';
 import { maskSecret } from './mask.ts';
 import { loadConfig, loadState, saveConfig, saveState } from './store.ts';
-import { routerNameProblem, type AuthEnvVar, type Config, type ProviderId, type Router } from './schema.ts';
+import {
+  accountNameProblem,
+  routerNameProblem,
+  type Account,
+  type AuthEnvVar,
+  type Config,
+  type ProviderId,
+  type Router,
+} from './schema.ts';
 import { normalizeUrl } from './url.ts';
 
 export interface NewRouterInput {
@@ -22,16 +44,44 @@ export interface NewRouterInput {
   readonly provider?: ProviderId;
   readonly authEnvVar?: AuthEnvVar;
   readonly testPath?: string;
+  /** Name for the account the key is stored under. Defaults to "Account 1". */
+  readonly accountName?: string;
 }
 
 export interface RouterPatch {
   readonly name?: string;
   readonly baseUrl?: string;
-  /** Omit to leave the stored key untouched. */
+  /** Omit to leave the stored key untouched. Applies to the selected account. */
   readonly apiKey?: string;
   readonly description?: string;
   readonly authEnvVar?: AuthEnvVar;
   readonly testPath?: string;
+}
+
+export interface NewAccountInput {
+  readonly name: string;
+  readonly apiKey: string;
+  readonly description?: string;
+}
+
+export interface AccountPatch {
+  readonly name?: string;
+  /** Omit to leave the stored key untouched. */
+  readonly apiKey?: string;
+  readonly description?: string;
+}
+
+/** Safe-to-print projection of one account. Never carries the key itself. */
+export interface AccountView {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly maskedKey: string;
+  readonly hasKey: boolean;
+  /** True when this is the account the router will authenticate with. */
+  readonly isActive: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
 }
 
 /** Safe-to-print projection of a router. Used by every renderer and --json. */
@@ -40,8 +90,12 @@ export interface RouterView {
   readonly name: string;
   readonly baseUrl: string;
   readonly description: string;
+  /** Mask of the *selected* account's key, so one line always shows what will be used. */
   readonly maskedKey: string;
   readonly hasKey: boolean;
+  readonly accountCount: number;
+  readonly activeAccountId?: string;
+  readonly activeAccountName?: string;
   readonly authEnvVar: AuthEnvVar;
   readonly provider: ProviderId;
   readonly isActive: boolean;
@@ -133,11 +187,24 @@ export class RouterService {
     const { url } = normalizeUrl(input.baseUrl);
     const id = uniqueId(name, this.#config.routers.map((router) => router.id));
     const timestamp = nowIso();
+    // A new router is created in the shape a migrated one ends up in: one account,
+    // selected, holding the key under the router's own ref.
+    const accountName = normalizeName(input.accountName ?? FIRST_ACCOUNT_NAME) || FIRST_ACCOUNT_NAME;
+    const account: Account = {
+      id: uniqueId(accountName, [], 'account'),
+      name: accountName,
+      credentialRef: credentialRefFor(id),
+      description: '',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
     const router: Router = {
       id,
       name,
       baseUrl: url,
       credentialRef: credentialRefFor(id),
+      accounts: [account],
+      activeAccount: account.id,
       description: (input.description ?? '').trim(),
       provider: input.provider ?? 'claude-code',
       authEnvVar: input.authEnvVar ?? 'ANTHROPIC_API_KEY',
@@ -149,7 +216,7 @@ export class RouterService {
 
     // Store the credential first: a config entry pointing at a key that was
     // never saved is the one inconsistency users cannot fix themselves.
-    await this.#credentials.set(router.credentialRef, apiKey);
+    await this.#credentials.set(account.credentialRef, apiKey);
     logger.protect(apiKey);
 
     this.#config = {
@@ -174,7 +241,9 @@ export class RouterService {
       if (apiKey.length === 0) {
         throw new RouterFlipError('ROUTER_INVALID', 'An API key cannot be empty.');
       }
-      await this.#credentials.set(existing.credentialRef, apiKey);
+      // Router-level edits act on the selected account, which is the one every
+      // launch would have used anyway.
+      await this.#credentials.set(credentialRefOf(existing), apiKey);
       logger.protect(apiKey);
     }
 
@@ -197,10 +266,10 @@ export class RouterService {
     return updated;
   }
 
-  /** Removes the profile and its stored key. */
+  /** Removes the profile and every key any of its accounts stored. */
   async remove(id: string): Promise<Router> {
     const existing = this.resolve(id);
-    await this.#credentials.remove(existing.credentialRef);
+    for (const ref of credentialRefsOf(existing)) await this.#credentials.remove(ref);
 
     const remaining = this.#config.routers.filter((router) => router.id !== existing.id);
     this.#config = {
@@ -228,20 +297,34 @@ export class RouterService {
     return router;
   }
 
-  /** Loads the key for a router, failing with a friendly message when absent. */
-  async apiKey(router: Router): Promise<string> {
-    const key = await this.#credentials.require(router.credentialRef, router.name);
+  /**
+   * Loads the key for a router, failing with a friendly message when absent.
+   *
+   * `account` names which credential to load; omitted, the router's selected
+   * account is used — the same choice a launch would make.
+   */
+  async apiKey(router: Router, account?: Account): Promise<string> {
+    const chosen = account ?? activeAccount(router);
+    const label = chosen ? accountLabel(router, chosen) : router.name;
+    const key = await this.#credentials.require(credentialRefOf(router, account), label);
     logger.protect(key);
     return key;
   }
 
-  async hasKey(router: Router): Promise<boolean> {
-    return Boolean(await this.#credentials.get(router.credentialRef));
+  async hasKey(router: Router, account?: Account): Promise<boolean> {
+    return Boolean(await this.#credentials.get(credentialRefOf(router, account)));
   }
 
-  /** Builds a print-safe view. `maskedKey` is a mask even when no key exists. */
-  async view(router: Router): Promise<RouterView> {
-    const key = await this.#credentials.get(router.credentialRef);
+  /**
+   * Builds a print-safe view. `maskedKey` is a mask even when no key exists.
+   *
+   * `account` overrides which account the view describes, so a command that was
+   * told `--account` shows the mask of the key it will actually use rather than
+   * the one that happens to be selected on disk.
+   */
+  async view(router: Router, account?: Account): Promise<RouterView> {
+    const selected = account ?? activeAccount(router);
+    const key = await this.#credentials.get(credentialRefOf(router, selected));
     if (key) logger.protect(key);
     return {
       id: router.id,
@@ -250,6 +333,8 @@ export class RouterService {
       description: router.description,
       maskedKey: maskSecret(key),
       hasKey: Boolean(key),
+      accountCount: router.accounts.length,
+      ...(selected ? { activeAccountId: selected.id, activeAccountName: selected.name } : {}),
       authEnvVar: router.authEnvVar,
       provider: router.provider,
       isActive: this.#config.activeRouter === router.id,
@@ -259,8 +344,191 @@ export class RouterService {
   }
 
   async views(): Promise<RouterView[]> {
-    const refs = this.#config.routers.map((router) => router.credentialRef);
+    const refs = this.#config.routers.flatMap((router) => [...credentialRefsOf(router)]);
     await this.#credentials.presence(refs); // warms the cache in one batch
     return Promise.all(this.#config.routers.map((router) => this.view(router)));
+  }
+
+  // ── Accounts ──────────────────────────────────────────────────────────────
+  //
+  // The router owns the base URL; each account owns one credential-store entry.
+  // Writes go through `#writeRouter` so there is still exactly one place that
+  // saves config.json.
+
+  #writeRouter(updated: Router): void {
+    this.#config = {
+      ...this.#config,
+      routers: this.#config.routers.map((router) => (router.id === updated.id ? updated : router)),
+    };
+    saveConfig(this.#config);
+  }
+
+  accounts(router: Router): readonly Account[] {
+    return router.accounts;
+  }
+
+  /** The account this router will authenticate with: selected, else the first. */
+  activeAccountOf(router: Router): Account | undefined {
+    return activeAccount(router);
+  }
+
+  /** Looks up by id, name or 1-based position. */
+  findAccount(router: Router, nameOrId: string): Account | undefined {
+    return findAccount(router, nameOrId);
+  }
+
+  /** Like `findAccount`, but throws with the names that do exist. */
+  resolveAccount(router: Router, nameOrId: string): Account {
+    const found = findAccount(router, nameOrId);
+    if (found) return found;
+    if (router.accounts.length === 0) {
+      throw new RouterFlipError('ROUTER_NOT_FOUND', `"${router.name}" has no accounts yet.`, {
+        hint: `Add one with \`routerflip accounts ${router.name}\`.`,
+      });
+    }
+    const known = router.accounts.map((account) => account.name).join(', ');
+    throw new RouterFlipError('ROUTER_NOT_FOUND', `"${router.name}" has no account named "${nameOrId}".`, {
+      hint: `Accounts: ${known}`,
+    });
+  }
+
+  /** Throws when `name` is taken by a different account of the same router. */
+  assertAccountNameAvailable(router: Router, name: string, exceptId?: string): void {
+    const problem = accountNameProblem(normalizeName(name));
+    if (problem) throw new RouterFlipError('ROUTER_INVALID', problem);
+    const clash = router.accounts.find((account) => sameName(account.name, name) && account.id !== exceptId);
+    if (clash) {
+      throw new RouterFlipError('ROUTER_DUPLICATE', `"${router.name}" already has an account named "${clash.name}".`, {
+        hint: 'Account names have to be unique within a router. Pick a different one.',
+      });
+    }
+  }
+
+  async addAccount(routerId: string, input: NewAccountInput): Promise<Account> {
+    const router = this.resolve(routerId);
+    const name = normalizeName(input.name) || FIRST_ACCOUNT_NAME;
+    this.assertAccountNameAvailable(router, name);
+
+    const apiKey = input.apiKey.trim();
+    if (apiKey.length === 0) {
+      throw new RouterFlipError('ROUTER_INVALID', 'An API key is required.', {
+        hint: 'The key is stored in your operating system credential store, not in config.json.',
+      });
+    }
+
+    const timestamp = nowIso();
+    const { id, credentialRef } = nextAccountIdentity(router, name);
+    const account: Account = { id, name, credentialRef, description: (input.description ?? '').trim(), createdAt: timestamp, updatedAt: timestamp };
+
+    // Key first, for the same reason as `add`: a config entry pointing at a
+    // credential that was never written is the one state a user cannot repair.
+    await this.#credentials.set(account.credentialRef, apiKey);
+    logger.protect(apiKey);
+
+    this.#writeRouter({
+      ...router,
+      accounts: [...router.accounts, account],
+      // The first account of a router is selected automatically; later ones are
+      // not, so adding an account never silently changes which key is in use.
+      ...(router.accounts.length === 0 ? { activeAccount: account.id } : {}),
+      updatedAt: timestamp,
+    });
+    logger.debug(`account added: ${router.id}/${account.id}`);
+    return account;
+  }
+
+  async updateAccount(routerId: string, accountId: string, patch: AccountPatch): Promise<Account> {
+    const router = this.resolve(routerId);
+    const existing = this.resolveAccount(router, accountId);
+    const name = patch.name === undefined ? existing.name : normalizeName(patch.name);
+    if (name !== existing.name) this.assertAccountNameAvailable(router, name, existing.id);
+
+    if (patch.apiKey !== undefined) {
+      const apiKey = patch.apiKey.trim();
+      if (apiKey.length === 0) throw new RouterFlipError('ROUTER_INVALID', 'An API key cannot be empty.');
+      // The ref is derived from the id, which never changes, so renaming an
+      // account cannot orphan its key.
+      await this.#credentials.set(existing.credentialRef, apiKey);
+      logger.protect(apiKey);
+    }
+
+    const updated: Account = {
+      ...existing,
+      name,
+      description: patch.description === undefined ? existing.description : patch.description.trim(),
+      updatedAt: nowIso(),
+    };
+    this.#writeRouter({
+      ...router,
+      accounts: router.accounts.map((account) => (account.id === existing.id ? updated : account)),
+      updatedAt: updated.updatedAt,
+    });
+    logger.debug(`account updated: ${router.id}/${updated.id}`);
+    return updated;
+  }
+
+  /**
+   * Removes an account and the credential-store entry it owned.
+   *
+   * The key goes first: an account left in config.json is visible and deletable,
+   * whereas a credential with nothing referencing it is invisible.
+   */
+  async removeAccount(routerId: string, accountId: string): Promise<Account> {
+    const router = this.resolve(routerId);
+    const existing = this.resolveAccount(router, accountId);
+    await this.#credentials.remove(existing.credentialRef);
+
+    const remaining = router.accounts.filter((account) => account.id !== existing.id);
+    // Never leave the selection pointing at something that is gone: fall to the
+    // first survivor, or drop the field when the router has no accounts left.
+    const nextActive = router.activeAccount === existing.id ? remaining[0]?.id : router.activeAccount;
+    const { activeAccount: _previous, ...rest } = router;
+    this.#writeRouter({
+      ...rest,
+      accounts: remaining,
+      ...(nextActive === undefined ? {} : { activeAccount: nextActive }),
+      updatedAt: nowIso(),
+    });
+    logger.debug(`account removed: ${router.id}/${existing.id}`);
+    return existing;
+  }
+
+  /**
+   * Selects a router *and* one of its accounts — the pair a launch needs.
+   *
+   * Both halves are written together on purpose: an active router whose account
+   * belongs to a different router is the one inconsistent state the account screen
+   * could otherwise produce.
+   */
+  setActiveAccount(routerId: string, accountId: string): { readonly router: Router; readonly account: Account } {
+    const router = this.resolve(routerId);
+    const account = this.resolveAccount(router, accountId);
+    this.#config = { ...this.#config, activeRouter: router.id };
+    this.#writeRouter({ ...router, activeAccount: account.id });
+    const updated = this.resolve(router.id);
+    logger.debug(`active account: ${updated.id}/${account.id}`);
+    return { router: updated, account };
+  }
+
+  /** Print-safe projection of one account. Carries a mask, never a key. */
+  async accountView(router: Router, account: Account): Promise<AccountView> {
+    const key = await this.#credentials.get(account.credentialRef);
+    if (key) logger.protect(key);
+    const selected = activeAccount(router);
+    return {
+      id: account.id,
+      name: account.name,
+      description: account.description,
+      maskedKey: maskSecret(key),
+      hasKey: Boolean(key),
+      isActive: selected?.id === account.id,
+      createdAt: account.createdAt,
+      updatedAt: account.updatedAt,
+    };
+  }
+
+  async accountViews(router: Router): Promise<AccountView[]> {
+    await this.#credentials.presence(router.accounts.map((account) => account.credentialRef));
+    return Promise.all(router.accounts.map((account) => this.accountView(router, account)));
   }
 }

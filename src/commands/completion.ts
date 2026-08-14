@@ -15,10 +15,10 @@ const SHELLS = ['bash', 'zsh', 'fish', 'powershell'] as const;
 type Shell = (typeof SHELLS)[number];
 
 const COMMANDS =
-  'add list use claude current status test edit delete deactivate doctor completion version help';
-const ROUTER_COMMANDS = 'use test edit delete';
+  'add list accounts use claude current status test edit delete deactivate doctor completion version help';
+const ROUTER_COMMANDS = 'use test edit delete accounts';
 const GLOBAL_FLAGS =
-  '--temporary --permanent --strategy --router --name --url --key --key-stdin --description --auth-env --path --timeout --all --yes --json --verbose --quiet --color --no-color --help --version';
+  '--temporary --permanent --strategy --router --account --name --url --key --key-stdin --description --auth-env --path --timeout --all --yes --json --verbose --quiet --color --no-color --help --version';
 
 /** Best guess from the environment, so `routerflip completion` alone works. */
 function detectShell(): Shell {

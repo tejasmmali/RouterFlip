@@ -9,8 +9,8 @@
  */
 import { RouterFlipError } from '../errors.ts';
 import type { AppContext } from '../context.ts';
-import type { Router } from '../core/schema.ts';
-import type { RouterView } from '../core/routers.ts';
+import type { Account, Router } from '../core/schema.ts';
+import type { AccountView, RouterView } from '../core/routers.ts';
 import { isInteractive } from '../ui/input.ts';
 import { confirm, select, type SelectOption } from '../ui/prompts.ts';
 import { logger } from '../logger.ts';
@@ -21,6 +21,11 @@ export type CommandResult = number | void;
 /** The `<name>` argument, however the user chose to pass it. */
 export function routerArg(ctx: AppContext, index = 0): string | undefined {
   return ctx.flags.str('router') ?? ctx.positionals[index] ?? ctx.flags.str('name');
+}
+
+/** The `--account` / `-a` argument: a name, an id, or a 1-based position. */
+export function accountArg(ctx: AppContext): string | undefined {
+  return ctx.flags.str('account');
 }
 
 /** Reads a secret from stdin, for `--key-stdin` in scripts and CI. */
@@ -137,10 +142,70 @@ export function routerJson(view: RouterView): Record<string, unknown> {
     description: view.description,
     apiKey: view.maskedKey,
     hasKey: view.hasKey,
+    accountCount: view.accountCount,
+    ...(view.activeAccountId ? { activeAccountId: view.activeAccountId } : {}),
+    ...(view.activeAccountName ? { activeAccountName: view.activeAccountName } : {}),
     authEnvVar: view.authEnvVar,
     provider: view.provider,
     isActive: view.isActive,
     createdAt: view.createdAt,
     updatedAt: view.updatedAt,
   };
+}
+
+/** JSON projection of one account. Contains a mask, never a key. */
+export function accountJson(view: AccountView): Record<string, unknown> {
+  return {
+    id: view.id,
+    name: view.name,
+    description: view.description,
+    apiKey: view.maskedKey,
+    hasKey: view.hasKey,
+    isActive: view.isActive,
+    createdAt: view.createdAt,
+    updatedAt: view.updatedAt,
+  };
+}
+
+function accountOptions(views: readonly AccountView[]): SelectOption<string>[] {
+  return views.map((view) => ({
+    label: view.name,
+    value: view.id,
+    // The mask, so the list is enough to tell two accounts apart.
+    detail: view.description ? `${view.maskedKey}  ·  ${view.description}` : view.maskedKey,
+    ...(view.isActive ? { hint: '(active)' } : {}),
+  }));
+}
+
+/**
+ * Asks which account, always. Used where the answer cannot be inferred — editing
+ * or deleting one is not something to guess at.
+ */
+export async function selectAccount(ctx: AppContext, router: Router, message: string): Promise<Account> {
+  const views = await ctx.service.accountViews(router);
+  const initial = Math.max(0, views.findIndex((view) => view.isActive));
+  const id = await select<string>({ message, options: accountOptions(views), initial });
+  return ctx.service.resolveAccount(router, id);
+}
+
+/**
+ * Resolves which account a command should authenticate with.
+ *
+ * `--account` wins; otherwise the router's selected account is used, and the
+ * user is only asked when there is a genuine choice (two or more accounts) and a
+ * terminal to ask on. `undefined` means the router has no accounts at all — the
+ * caller reports that, since only it knows what the user was trying to do.
+ */
+export async function pickAccount(
+  ctx: AppContext,
+  router: Router,
+  message = 'Which account should Claude Code use?',
+): Promise<Account | undefined> {
+  const named = accountArg(ctx);
+  if (named !== undefined) return ctx.service.resolveAccount(router, named);
+
+  const accounts = ctx.service.accounts(router);
+  if (accounts.length < 2 || ctx.json || !isInteractive()) return ctx.service.activeAccountOf(router);
+
+  return selectAccount(ctx, router, message);
 }

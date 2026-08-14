@@ -26,7 +26,13 @@ export async function credentialCommand(ctx: AppContext): Promise<CommandResult>
   }
 
   const router = ctx.service.resolve(target);
-  const key = await ctx.service.apiKey(router);
+  // `--account` is written by the helper command permanent mode installs, so the
+  // key served here is the one that was chosen then — not merely whichever
+  // account happens to be selected now. Omitted, the selected account is used,
+  // which is what a settings file written by an older RouterFlip asks for.
+  const wanted = ctx.flags.str('account');
+  const account = wanted === undefined ? undefined : ctx.service.resolveAccount(router, wanted);
+  const key = await ctx.service.apiKey(router, account);
   process.stdout.write(`${key}\n`);
   return 0;
 }

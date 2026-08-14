@@ -8,6 +8,7 @@
 import { paths } from './paths.ts';
 import { backupFile, pruneBackups, readTextIfExists, writeJsonAtomic, ensureDir } from './fsx.ts';
 import { configSchema, emptyConfig, emptyState, stateSchema, type Config, type State } from './schema.ts';
+import { migrateConfig } from './migrate.ts';
 import { formatIssues } from './validate.ts';
 import { RouterFlipError } from '../errors.ts';
 
@@ -34,11 +35,22 @@ function parseJsonFile<T>(
   return result.value as T;
 }
 
+/**
+ * Reads config.json, migrating it forward if it predates the current version.
+ *
+ * The migrated result is written back only when something actually changed, so
+ * reading is still read-only on an up-to-date file and on a machine with no
+ * config.json at all. The write goes through `saveConfig`, which means the
+ * pre-migration file is preserved as a timestamped backup for free.
+ */
 export function loadConfig(): Config {
   const { configFile } = paths();
   const raw = readTextIfExists(configFile);
   if (raw === undefined || raw.trim().length === 0) return emptyConfig();
-  return parseJsonFile<Config>(configFile, raw, (input) => configSchema.safeParse(input));
+  const parsed = parseJsonFile<Config>(configFile, raw, (input) => configSchema.safeParse(input));
+  const migrated = migrateConfig(parsed);
+  if (migrated.changed) saveConfig(migrated.config);
+  return migrated.config;
 }
 
 export function saveConfig(config: Config): void {

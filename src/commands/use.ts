@@ -11,7 +11,7 @@
  *               (spec §6).
  */
 import type { AppContext } from '../context.ts';
-import type { Router } from '../core/schema.ts';
+import type { Account, Router } from '../core/schema.ts';
 import { updateState } from '../core/store.ts';
 import { nowIso } from '../core/id.ts';
 import { RouterFlipError } from '../errors.ts';
@@ -23,7 +23,7 @@ import { blank, heading, json, line, note, success, warning } from '../ui/output
 import { select } from '../ui/prompts.ts';
 import { theme } from '../ui/theme.ts';
 import { routerDetailLines } from '../ui/views.ts';
-import { confirmAction, pickRouter, routerJson, type CommandResult } from './shared.ts';
+import { confirmAction, pickAccount, pickRouter, routerJson, type CommandResult } from './shared.ts';
 
 const STRATEGIES: readonly PermanentStrategy[] = ['env', 'helper'];
 
@@ -37,7 +37,7 @@ function shadowingVars(ctx: AppContext, router: Router): string[] {
   });
 }
 
-async function askMode(ctx: AppContext, router: Router): Promise<Mode> {
+async function askMode(ctx: AppContext, router: Router, account?: Account): Promise<Mode> {
   if (ctx.flags.bool('temporary')) return 'temporary';
   if (ctx.flags.bool('permanent')) return 'permanent';
 
@@ -48,9 +48,17 @@ async function askMode(ctx: AppContext, router: Router): Promise<Mode> {
     });
   }
 
-  const view = await ctx.service.view(router);
+  const view = await ctx.service.view(router, account);
   blank();
   for (const row of routerDetailLines(view)) line(row);
+  // Which account only matters when the router has more than one; the mask above
+  // already belongs to this account, so naming it is enough.
+  if (account && router.accounts.length > 1) {
+    const t = theme();
+    blank();
+    line(`  ${t.muted('Account')}`);
+    line(`  ${t.text(account.name)}`);
+  }
   blank();
 
   return select<Mode>({
@@ -74,19 +82,28 @@ async function askMode(ctx: AppContext, router: Router): Promise<Mode> {
 /**
  * Temporary mode. Returns the child's exit code so the wrapper is transparent:
  * `routerflip use x --temporary` exits exactly as `claude` would have.
+ *
+ * `account` names the credential to launch with; omitted, the router's selected
+ * account is used. The router still owns the base URL either way — an account
+ * only ever contributes a key.
  */
 export async function activateTemporary(
   ctx: AppContext,
   router: Router,
   args: readonly string[] = [],
+  account?: Account,
 ): Promise<number> {
-  const apiKey = await ctx.service.apiKey(router);
+  const chosen = account ?? ctx.service.activeAccountOf(router);
+  const apiKey = await ctx.service.apiKey(router, chosen);
   const t = theme();
 
   if (!ctx.json) {
     blank();
     note(`  ${t.accent('Temporary')} ${t.muted('— this affects the launched process only.')}`);
     note(`  ${t.muted('Router')}   ${t.text(router.name)}`);
+    // Named only when there was a choice to make, so a single-account setup reads
+    // exactly as it did before accounts existed.
+    if (chosen && router.accounts.length > 1) note(`  ${t.muted('Account')}  ${t.text(chosen.name)}`);
     note(`  ${t.muted('Base URL')} ${t.dim(router.baseUrl)}`);
     note(`  ${t.muted('Auth via')} ${t.dim(router.authEnvVar)}`);
     blank();
@@ -94,7 +111,12 @@ export async function activateTemporary(
 
   // Recorded for `status` only. This is RouterFlip's own state file; no provider
   // configuration and no environment outside the child is involved.
-  updateState((state) => ({ ...state, lastTemporaryRouterId: router.id, lastTemporaryAt: nowIso() }));
+  updateState((state) => ({
+    ...state,
+    lastTemporaryRouterId: router.id,
+    ...(chosen ? { lastTemporaryAccountId: chosen.id } : {}),
+    lastTemporaryAt: nowIso(),
+  }));
 
   const result = await launchRouter({
     router,
@@ -106,8 +128,9 @@ export async function activateTemporary(
 }
 
 /** Permanent mode. Confirms, backs up, writes only RouterFlip's own keys. */
-export async function activatePermanent(ctx: AppContext, router: Router): Promise<CommandResult> {
-  const apiKey = await ctx.service.apiKey(router);
+export async function activatePermanent(ctx: AppContext, router: Router, account?: Account): Promise<CommandResult> {
+  const chosen = account ?? ctx.service.activeAccountOf(router);
+  const apiKey = await ctx.service.apiKey(router, chosen);
   const strategy = ctx.flags.choice<PermanentStrategy>('strategy', STRATEGIES);
   const snapshot = ctx.provider.inspect();
   const t = theme();
@@ -115,8 +138,9 @@ export async function activatePermanent(ctx: AppContext, router: Router): Promis
   const details = [
     `Target file: ${snapshot.file}`,
     `Sets: ${ctx.provider.envKeys(router).join(', ')}`,
+    ...(chosen && router.accounts.length > 1 ? [`Account: ${chosen.name}`] : []),
     // Say plainly where the secret ends up, before anything is written.
-    strategy === 'env' || ctx.provider.helperCommand?.(router) === undefined
+    strategy === 'env' || ctx.provider.helperCommand?.(router, chosen) === undefined
       ? 'The API key is written into that file in plain text, because no credential helper is available.'
       : 'The API key stays in your OS credential store; the file only gets a command that fetches it.',
     snapshot.exists
@@ -138,14 +162,18 @@ export async function activatePermanent(ctx: AppContext, router: Router): Promis
     apiKey,
     provider: ctx.provider,
     ...(strategy ? { strategy } : {}),
+    ...(chosen ? { account: chosen } : {}),
     backupRetention: ctx.config.settings.backupRetention,
   });
-  ctx.service.setActive(router.id);
+  // Selecting a router permanently selects the account it authenticated with, so
+  // the two halves of the choice can never disagree afterwards.
+  if (chosen) ctx.service.setActiveAccount(router.id, chosen.id);
+  else ctx.service.setActive(router.id);
 
   const shadowed = shadowingVars(ctx, router);
 
   if (ctx.json) {
-    const view = await ctx.service.view(router);
+    const view = await ctx.service.view(router, chosen);
     json({
       ok: true,
       mode: 'permanent',
@@ -164,6 +192,11 @@ export async function activatePermanent(ctx: AppContext, router: Router): Promis
   blank();
   success(`Claude Code now uses "${router.name}".`);
   blank();
+  if (chosen && router.accounts.length > 1) {
+    line(`  ${t.muted('Account')}`);
+    line(`  ${t.text(chosen.name)}`);
+    blank();
+  }
   line(`  ${t.muted('Written to')}`);
   line(`  ${outcome.result.targetFile}`);
   blank();
@@ -206,18 +239,30 @@ export interface UseOutcome {
   readonly launched: boolean;
 }
 
-/** The `use` flow for a router that has already been chosen. */
-export async function useRouter(ctx: AppContext, router: Router): Promise<UseOutcome> {
-  const mode = await askMode(ctx, router);
+/**
+ * The `use` flow for a router that has already been chosen.
+ *
+ * `account` is passed by the dashboard, which has just had the user select one;
+ * from the command line it is resolved here — `--account`, else the router's
+ * selected account, asking only when there is a real choice and a terminal.
+ */
+export async function useRouter(ctx: AppContext, router: Router, account?: Account): Promise<UseOutcome> {
+  if (router.accounts.length === 0) {
+    throw new RouterFlipError('CREDENTIAL_MISSING', `"${router.name}" has no accounts, so there is no key to launch with.`, {
+      hint: `Add one with \`routerflip accounts ${router.name} add\`.`,
+    });
+  }
+  const chosen = account ?? (await pickAccount(ctx, router));
+  const mode = await askMode(ctx, router, chosen);
 
   if (mode === 'cancel') {
     if (!ctx.json) note('  Cancelled. Nothing was changed.');
     return { exitCode: 0, launched: false };
   }
   if (mode === 'temporary') {
-    return { exitCode: await activateTemporary(ctx, router, ctx.rest), launched: true };
+    return { exitCode: await activateTemporary(ctx, router, ctx.rest, chosen), launched: true };
   }
-  const result = await activatePermanent(ctx, router);
+  const result = await activatePermanent(ctx, router, chosen);
   return { exitCode: typeof result === 'number' ? result : 0, launched: false };
 }
 

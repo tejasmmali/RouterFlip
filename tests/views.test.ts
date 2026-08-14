@@ -12,7 +12,13 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   TAGLINE,
+  accountBannerLines,
+  accountDetailLines,
+  accountKeybar,
+  accountListLines,
+  accountRow,
   bannerLines,
+  emptyAccountsLines,
   emptyStateLines,
   keybar,
   relativeTime,
@@ -26,7 +32,7 @@ import { createTheme, setTheme, theme } from '../src/ui/theme.ts';
 import { glyphs } from '../src/ui/icons.ts';
 import { displayWidth } from '../src/ui/width.ts';
 import { maskSecret } from '../src/core/mask.ts';
-import type { RouterView } from '../src/core/routers.ts';
+import type { AccountView, RouterView } from '../src/core/routers.ts';
 import type { TestReport } from '../src/services/tester.ts';
 import { TEST_KEY } from './helpers.ts';
 
@@ -43,8 +49,26 @@ function makeView(overrides: Partial<RouterView> = {}): RouterView {
     description: 'Primary gateway',
     maskedKey: maskSecret(TEST_KEY),
     hasKey: true,
+    accountCount: 1,
+    activeAccountId: 'account-1',
+    activeAccountName: 'Account 1',
     authEnvVar: 'ANTHROPIC_API_KEY',
     provider: 'claude-code',
+    isActive: false,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/** A complete AccountView literal, so a test can vary just the field it is about. */
+function makeAccountView(overrides: Partial<AccountView> = {}): AccountView {
+  return {
+    id: 'account-1',
+    name: 'Account 1',
+    description: '',
+    maskedKey: maskSecret(TEST_KEY),
+    hasKey: true,
     isActive: false,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
@@ -136,6 +160,105 @@ test('the empty state names the command that fixes it', () => {
   assert.match(text, /No Routers Yet/);
   assert.match(text, /routerflip add/);
   assert.match(text, /press A/, 'the dashboard offers the same action without retyping');
+});
+
+// ── Accounts ────────────────────────────────────────────────────────────────
+
+test('a router row counts its accounts only when there is a choice to make', () => {
+  const single = routerRow(makeView(), false).join('\n');
+  assert.equal(/accounts/.test(single), false, 'one account must look exactly as it did before accounts existed');
+  assert.equal(single.includes('Account 1'), false, 'naming the only account there is would be noise');
+
+  const many = routerRow(makeView({ accountCount: 3, activeAccountName: 'Account 2' }), false);
+  assert.match(many[0] ?? '', /3 accounts/);
+  assert.match(many[1] ?? '', /Account 2/, 'which one a launch would use belongs next to the URL');
+  assert.match(many[1] ?? '', /cdef/, 'with the mask, so two accounts are told apart');
+  assert.equal(many.join('\n').includes(TEST_KEY), false);
+  assert.equal(many.length, 2, 'still two lines per router, however many accounts it has');
+});
+
+test('a router with no accounts says so instead of claiming a missing key', () => {
+  const row = routerRow(makeView({ accountCount: 0, hasKey: false }), false).join('\n');
+  assert.match(row, /no accounts/);
+  assert.equal(/no key/.test(row), false, 'a router with no accounts has no key by definition');
+});
+
+test('the list table has an accounts column', () => {
+  const lines = routerTableLines([
+    makeView({ accountCount: 3, activeAccountName: 'Account 2' }),
+    makeView({ id: 'beta-1', name: 'Beta', accountCount: 0, hasKey: false }),
+  ]);
+  assert.match(lines[0] ?? '', /ACCOUNTS/);
+  assert.match(lines[1] ?? '', /3 · Account 2/, 'how many, and which one');
+  assert.match(lines[2] ?? '', /none/);
+  assert.equal(lines.join('\n').includes(TEST_KEY), false);
+});
+
+test('an account row shows the mask beneath the name, and never the key', () => {
+  const g = glyphs();
+  const lines = accountRow(makeAccountView({ isActive: true, description: 'billing' }), true);
+
+  assert.equal(lines.length, 2, 'the same two-line shape as a router row');
+  assert.match(lines[0] ?? '', /Account 1/);
+  assert.match(lines[0] ?? '', /active/);
+  assert.equal((lines[0] ?? '').includes(g.activeDot), true, 'the active account is marked, not only coloured');
+  assert.equal((lines[0] ?? '').includes(g.pointer), true);
+  assert.match(lines[1] ?? '', /cdef/, 'the last four identify which key this is');
+  assert.match(lines[1] ?? '', /billing/);
+  assert.equal(lines.join('\n').includes(TEST_KEY), false, 'the key itself is never on screen');
+  assert.equal(lines.join('\n').includes('sk-test'), false, 'not even the prefix');
+});
+
+test('an account with no stored key is flagged rather than shown as blank', () => {
+  const lines = accountRow(makeAccountView({ hasKey: false, maskedKey: maskSecret(undefined) }), false);
+  assert.match(lines[0] ?? '', /no key/);
+  assert.equal((lines[1] ?? '').trim().length > 0, true, 'the mask row stays a mask');
+  assert.match(accountDetailLines(makeAccountView({ hasKey: false })).join('\n'), /not stored/);
+});
+
+test('exactly one account row carries the pointer', () => {
+  const g = glyphs();
+  const views = [makeAccountView({ isActive: true }), makeAccountView({ id: 'account-2', name: 'Account 2' })];
+  const focused = accountListLines(views, 1);
+
+  assert.equal(focused.length, 4, 'two lines per account');
+  assert.equal((focused[0] ?? '').includes(g.pointer), false);
+  assert.equal((focused[2] ?? '').includes(g.pointer), true);
+  assert.equal(accountListLines(views).join('\n').includes(g.pointer), false, 'a cursor of -1 focuses nothing');
+  assert.equal(
+    displayWidth(focused[2] ?? ''),
+    displayWidth(accountListLines(views)[2] ?? ''),
+    'the pointer replaces a space, so rows do not shift',
+  );
+});
+
+test('the account screen repeats the router it belongs to', () => {
+  const lines = accountBannerLines(makeView({ accountCount: 3 }), 60);
+  const text = lines.join('\n');
+  assert.match(text, /Alpha/, 'the router owns the identity');
+  assert.match(text, /api\.alpha\.example/, 'and the base URL, which no account duplicates');
+  for (const line of lines) assert.equal(displayWidth(line), 60);
+});
+
+test('the account key hints offer Back rather than Quit', () => {
+  const bar = theme().strip(accountKeybar());
+  const expected = ['Navigate', 'Select', 'Add Account', 'Edit', 'Delete', 'Back'];
+  let cursor = -1;
+  for (const label of expected) {
+    const at = bar.indexOf(label);
+    assert.ok(at > cursor, `${label} is missing or out of order`);
+    cursor = at;
+  }
+  for (const key of ['Enter', 'A', 'E', 'D', 'B']) assert.match(bar, new RegExp(key));
+  assert.equal(/Quit/.test(bar), false, 'leaving RouterFlip from here would lose the user’s place');
+});
+
+test('the no-accounts state names both ways out', () => {
+  const text = emptyAccountsLines('GoRouter', 60).join('\n');
+  assert.match(text, /No Accounts Yet/);
+  assert.match(text, /GoRouter has no accounts/);
+  assert.match(text, /routerflip accounts GoRouter/, 'the command that works from a shell');
+  assert.match(text, /press A/, 'and the key that works right here');
 });
 
 test('boxes are exactly as wide as they are asked to be', () => {

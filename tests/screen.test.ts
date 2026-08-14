@@ -21,7 +21,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { ESC } from '../src/ui/ansi.ts';
 import { openInput, type InputSession } from '../src/ui/input.ts';
+import { isShortcut } from '../src/ui/keys.ts';
 import { blank, heading, line } from '../src/ui/output.ts';
 import { releaseScreen, runScreen, withInlineView, type ScreenOutcome } from '../src/ui/screen.ts';
 import { createTheme, setTheme, theme } from '../src/ui/theme.ts';
@@ -32,6 +34,8 @@ import { Vt } from './vt.ts';
 const SHELL_LINE = 'PS C:\\> routerflip';
 /** A marker only the dashboard draws, so "is it underneath?" is answerable. */
 const DASHBOARD = 'DASHBOARD BODY';
+/** The same, for the account screen the dashboard opens on Enter. */
+const ACCOUNTS = 'ACCOUNTS BODY';
 
 type Restore = () => void;
 
@@ -315,5 +319,108 @@ test('with no screen open an inline view just scrolls, as a plain command should
     assert.equal(vt.enters, 0, 'no buffer switch, no clear-screen — `routerflip add` is unchanged');
     assert.equal(vt.isAlternate, false);
     assert.equal(vt.normalText, `${SHELL_LINE}\n  Add a router`);
+  });
+});
+
+// ── Accounts navigation ─────────────────────────────────────────────────────
+//
+// The account screen is a *mode* of the dashboard's single `runScreen`, not a
+// second one — `dashboardCommand` switches `Mode` and re-renders. That is a frame
+// lifecycle claim, so it belongs here: a nested `runScreen` would enter the
+// alternate buffer a second time, and the terminal would then be owed two
+// restores instead of one.
+
+/** The dashboard reduced to its two modes and the keys that move between them. */
+function openModalDashboard(): Promise<number | undefined> {
+  let mode: 'routers' | 'accounts' = 'routers';
+  return runScreen<number>({
+    render: () => ['', `  ${mode === 'accounts' ? ACCOUNTS : DASHBOARD}`],
+    onKey: (key) => {
+      if (mode === 'accounts') {
+        // `B` and Esc go back rather than quitting, so the user keeps their place.
+        if (key.name === 'escape' || isShortcut(key, 'b') || key.name === 'left') {
+          mode = 'routers';
+          return undefined;
+        }
+        if (isShortcut(key, 'a')) return withInlineView(() => inlineView('Add an account')).then(() => undefined);
+        if (isShortcut(key, 'q')) return { done: true, value: 0 };
+        return undefined;
+      }
+      if (key.name === 'enter' || key.name === 'right') {
+        mode = 'accounts';
+        return undefined;
+      }
+      if (isShortcut(key, 'q')) return { done: true, value: 0 };
+      return undefined;
+    },
+  });
+}
+
+test('the account screen replaces the router list in the same buffer, and Back restores it', async () => {
+  await withFakeTerminal(async (vt) => {
+    const done = openModalDashboard();
+    await settle();
+    assert.equal(vt.count(DASHBOARD), 1);
+
+    // routerflip → Enter → Back → Enter → Esc → Enter → Back.
+    for (let round = 1; round <= 3; round += 1) {
+      press('\r');
+      await settle();
+      assert.equal(vt.count(ACCOUNTS), 1, `round ${round}: one account screen, not ${round}`);
+      assert.equal(vt.count(DASHBOARD), 0, `round ${round}: the router list is not left underneath`);
+
+      press(round === 2 ? ESC : 'b');
+      await settle();
+      assert.equal(vt.count(DASHBOARD), 1, `round ${round}: the dashboard comes back exactly once`);
+      assert.equal(vt.count(ACCOUNTS), 0, `round ${round}: the account screen is replaced, not scrolled away`);
+    }
+
+    assert.equal(vt.enters, 1, 'the account screen is a mode of one screen, not a second alternate buffer');
+    assert.equal(vt.exits, 0);
+
+    press('q');
+    await settle();
+    assert.equal(await done, 0);
+    assert.equal(vt.isAlternate, false);
+    assert.equal(vt.exits, 1, 'one entry, one exit — the terminal is restored exactly once');
+    assert.equal(vt.normalText, SHELL_LINE, 'the scrollback is byte-for-byte as the shell left it');
+  });
+});
+
+test('adding an account returns to the account screen, on the one reader throughout', async () => {
+  await withFakeTerminal(async (vt) => {
+    const base = readers();
+    const done = openModalDashboard();
+    await settle();
+    assert.equal(readers(), base + 1, 'the dashboard is reading keys');
+
+    press('\r');
+    await settle();
+    assert.equal(vt.count(ACCOUNTS), 1);
+
+    press('a');
+    await settle();
+    assert.equal(vt.count('Add an account'), 1);
+    assert.equal(vt.count(ACCOUNTS), 0, 'the form replaces the list it was opened from');
+    assert.equal(vt.count(DASHBOARD), 0, 'and the router list is nowhere on screen');
+    assert.equal(readers(), base + 1, 'the form sits on the same reader instead of opening its own');
+
+    press(' ');
+    await settle();
+    assert.equal(vt.count(ACCOUNTS), 1, 'the account screen comes back, not the router list');
+    assert.equal(vt.count('Add an account'), 0);
+    assert.equal(vt.count('RouterFlip'), 0, 'nothing of the form survives on the account screen');
+    assert.equal(vt.count(DASHBOARD), 0);
+
+    press('b');
+    await settle();
+    assert.equal(vt.count(DASHBOARD), 1, 'and Back still leads to the router list afterwards');
+    assert.equal(vt.enters, 1);
+
+    press('q');
+    await settle();
+    await done;
+    assert.equal(readers(), base, 'nothing is left listening when the screen is gone');
+    assert.equal(vt.normalText, SHELL_LINE);
   });
 });

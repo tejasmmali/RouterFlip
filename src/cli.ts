@@ -16,6 +16,7 @@ import { isInteractive } from './ui/input.ts';
 import { note, printError } from './ui/output.ts';
 import { theme } from './ui/theme.ts';
 import { addCommand } from './commands/add.ts';
+import { accountsCommand } from './commands/accounts.ts';
 import { completionCommand } from './commands/completion.ts';
 import { credentialCommand } from './commands/credential.ts';
 import { currentCommand } from './commands/current.ts';
@@ -43,6 +44,8 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
   new: (ctx) => addCommand(ctx),
   list: listCommand,
   ls: listCommand,
+  accounts: accountsCommand,
+  account: accountsCommand,
   use: useCommand,
   switch: useCommand,
   claude: runCommand,

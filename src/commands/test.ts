@@ -8,12 +8,12 @@
  * a particular API surface.
  */
 import type { AppContext } from '../context.ts';
-import type { Router } from '../core/schema.ts';
+import type { Account, Router } from '../core/schema.ts';
 import { json, blank, failure, line, note, success, warning } from '../ui/output.ts';
 import { StepList, type StepState } from '../ui/spinner.ts';
 import { theme } from '../ui/theme.ts';
 import { endpointFor, testRouter, type FetchLike, type StepStatus, type TestReport } from '../services/tester.ts';
-import { pickRouter, type CommandResult } from './shared.ts';
+import { accountArg, pickRouter, type CommandResult } from './shared.ts';
 
 const STEP_ORDER = ['url', 'reachable', 'endpoint', 'auth'] as const;
 const STEP_LABELS = ['URL format', 'Network reachable', 'Endpoint responding', 'Authentication accepted'] as const;
@@ -30,11 +30,13 @@ export interface RunTestOptions {
   readonly fetchImpl?: FetchLike;
   /** Suppress the printed summary; the caller renders its own. */
   readonly silent?: boolean;
+  /** Which credential to test with. Defaults to the router's selected account. */
+  readonly account?: Account;
 }
 
 /** Runs the checklist for one router and prints it. Returns the report. */
 export async function runTest(ctx: AppContext, router: Router, options: RunTestOptions = {}): Promise<TestReport> {
-  const apiKey = await ctx.service.apiKey(router);
+  const apiKey = await ctx.service.apiKey(router, options.account);
   const live = ctx.json || options.silent ? undefined : new StepList([...STEP_LABELS]);
 
   if (live) {
@@ -116,11 +118,15 @@ function reportJson(report: TestReport): Record<string, unknown> {
 
 export async function testCommand(ctx: AppContext): Promise<CommandResult> {
   const targets: readonly Router[] = ctx.flags.bool('all') ? ctx.service.list() : [await pickRouter(ctx, 'Test which router?')];
+  // `--account` only makes sense for a single router; across `--all` each router
+  // is tested with its own selected account.
+  const named = ctx.flags.bool('all') ? undefined : accountArg(ctx);
 
   const reports: TestReport[] = [];
   for (const router of targets) {
     if (!ctx.json && reports.length > 0) blank();
-    reports.push(await runTest(ctx, router));
+    const account = named === undefined ? undefined : ctx.service.resolveAccount(router, named);
+    reports.push(await runTest(ctx, router, account ? { account } : {}));
   }
 
   if (ctx.json) {

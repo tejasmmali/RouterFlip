@@ -12,7 +12,14 @@
  */
 import * as v from './validate.ts';
 
-export const CONFIG_VERSION = 1;
+/**
+ * 1 → 2 introduced `routers[].accounts`. Version 1 files carry a single key on
+ * the router itself and are migrated on load (see `core/migrate.ts`); the bump is
+ * what makes that migration run exactly once.
+ */
+export const CONFIG_VERSION = 2;
+/** Config versions below this still keep their credential on the router. */
+export const ACCOUNTS_VERSION = 2;
 export const STATE_VERSION = 1;
 
 /** Env var a gateway expects the key in. Both are honoured by Claude Code. */
@@ -39,6 +46,39 @@ export function routerNameProblem(name: string): string | undefined {
   return undefined;
 }
 
+/** Same rule as router names, reported against the field the user was editing. */
+export function accountNameProblem(name: string): string | undefined {
+  for (const ch of name) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return 'Account name must not contain control characters.';
+  }
+  return undefined;
+}
+
+/**
+ * One credential belonging to a router.
+ *
+ * An account is deliberately *not* a place to put a base URL: the router owns the
+ * endpoint and the account owns only the key that authenticates against it. As
+ * everywhere else in config.json the key itself is absent — `credentialRef` names
+ * an entry in the OS credential store.
+ */
+export const accountSchema = v.object({
+  id: v.string({ min: 1, max: 64, label: 'Account id' }),
+  name: v.string({
+    min: 1,
+    max: 48,
+    label: 'Account name',
+    check: accountNameProblem,
+  }),
+  credentialRef: v.string({ min: 1, label: 'Credential reference' }),
+  description: v.string({ max: 200 }).withDefault(''),
+  createdAt: v.string({ min: 1 }),
+  updatedAt: v.string({ min: 1 }),
+});
+
+export type Account = v.Infer<typeof accountSchema>;
+
 export const routerSchema = v.object({
   id: v.string({ min: 1, max: 64, label: 'Router id' }),
   name: v.string({
@@ -48,7 +88,18 @@ export const routerSchema = v.object({
     check: routerNameProblem,
   }),
   baseUrl: v.string({ min: 1, label: 'Base URL' }),
+  /**
+   * The router's own credential-store entry.
+   *
+   * Still required, and still the ref the *first* account uses, which is what lets
+   * a version 1 config gain accounts without a single key being moved or
+   * re-entered. It also keeps a router that somehow has no accounts usable.
+   */
   credentialRef: v.string({ min: 1, label: 'Credential reference' }),
+  /** Credentials for this router. One per account; the router owns the URL. */
+  accounts: v.array(accountSchema).withDefault(() => []),
+  /** Account selected for this router. Cleared when that account is deleted. */
+  activeAccount: v.string({ min: 1 }).optional(),
   description: v.string({ max: 200 }).withDefault(''),
   provider: v.literalUnion(PROVIDER_IDS).withDefault(DEFAULT_PROVIDER),
   authEnvVar: v.literalUnion(AUTH_ENV_VARS).withDefault(DEFAULT_AUTH_ENV_VAR),
@@ -95,6 +146,9 @@ export type Settings = Config['settings'];
 export const activationSchema = v.object({
   routerId: v.string({ min: 1 }),
   routerName: v.string({ min: 1 }),
+  /** Account whose key was applied. Absent on records written before accounts. */
+  accountId: v.string({ min: 1 }).optional(),
+  accountName: v.string({ min: 1 }).optional(),
   provider: v.literalUnion(PROVIDER_IDS).withDefault(DEFAULT_PROVIDER),
   appliedAt: v.string({ min: 1 }),
   targetFile: v.string({ min: 1 }),
@@ -113,6 +167,7 @@ export const stateSchema = v.object({
   credentialBackend: v.literalUnion(['keychain', 'secret-service', 'dpapi', 'file']).optional(),
   lastUsedRouterId: v.string({ min: 1 }).optional(),
   lastTemporaryRouterId: v.string({ min: 1 }).optional(),
+  lastTemporaryAccountId: v.string({ min: 1 }).optional(),
   lastTemporaryAt: v.string({ min: 1 }).optional(),
 });
 

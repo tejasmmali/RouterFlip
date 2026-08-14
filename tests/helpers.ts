@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { Credentials } from '../src/credentials/index.ts';
 import { RouterService } from '../src/core/routers.ts';
-import type { Router } from '../src/core/schema.ts';
+import type { Account, Router } from '../src/core/schema.ts';
 
 export interface Sandbox {
   readonly home: string;
@@ -68,10 +68,31 @@ export function makeRouter(overrides: Partial<Router> = {}): Router {
     name: 'Alpha',
     baseUrl: 'https://api.alpha.example',
     credentialRef: 'routerflip-alpha-1',
+    accounts: [makeAccount()],
+    activeAccount: 'account-1',
     description: '',
     provider: 'claude-code',
     authEnvVar: 'ANTHROPIC_API_KEY',
     metadata: {},
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    ...overrides,
+  };
+}
+
+/**
+ * A complete Account literal.
+ *
+ * The default ref is the router's own, which is the shape both a migrated
+ * version 1 profile and a freshly added router end up in.
+ */
+export function makeAccount(overrides: Partial<Account> = {}): Account {
+  const timestamp = '2026-01-01T00:00:00.000Z';
+  return {
+    id: 'account-1',
+    name: 'Account 1',
+    credentialRef: 'routerflip-alpha-1',
+    description: '',
     createdAt: timestamp,
     updatedAt: timestamp,
     ...overrides,

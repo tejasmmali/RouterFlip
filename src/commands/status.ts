@@ -32,6 +32,9 @@ export async function statusCommand(ctx: AppContext): Promise<CommandResult> {
   const activation = currentActivation();
   const detection = await ctx.provider.detect();
   const env = envSummary();
+  // The router owns the base URL but an account owns the key, so which account is
+  // selected is part of "what will Claude Code do now?" — by name only, never a value.
+  const account = router ? ctx.service.activeAccountOf(router) : undefined;
 
   if (ctx.json) {
     const view = router ? await ctx.service.view(router) : undefined;
@@ -39,8 +42,14 @@ export async function statusCommand(ctx: AppContext): Promise<CommandResult> {
       ok: true,
       routers: ctx.service.list().length,
       router: view ? routerJson(view) : null,
+      account: account ? { id: account.id, name: account.name } : null,
       permanent: activation
-        ? { router: activation.routerName, targetFile: activation.targetFile, appliedAt: activation.appliedAt }
+        ? {
+            router: activation.routerName,
+            ...(activation.accountName ? { account: activation.accountName } : {}),
+            targetFile: activation.targetFile,
+            appliedAt: activation.appliedAt,
+          }
         : null,
       provider: {
         id: ctx.provider.id,
@@ -63,10 +72,19 @@ export async function statusCommand(ctx: AppContext): Promise<CommandResult> {
   field('Routers', `${ctx.service.list().length}`);
   field('Selected', router ? t.text(router.name) : t.dim('none'));
   if (router) field('Base URL', t.dim(router.baseUrl));
+  if (router) {
+    const total = router.accounts.length;
+    field(
+      'Account',
+      account
+        ? `${t.text(account.name)}${total > 1 ? t.dim(` (of ${total})`) : ''}`
+        : t.warning('none — this router has no accounts'),
+    );
+  }
   field(
     'Permanent',
     activation
-      ? `${t.success(activation.routerName)} ${t.dim(`· ${relativeTime(activation.appliedAt)} · ${activation.targetFile}`)}`
+      ? `${t.success(activation.routerName)}${activation.accountName ? t.dim(` · ${activation.accountName}`) : ''} ${t.dim(`· ${relativeTime(activation.appliedAt)} · ${activation.targetFile}`)}`
       : t.dim('not applied'),
   );
   field(
