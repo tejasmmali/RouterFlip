@@ -17,6 +17,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { RouterFlipError, describeCause } from '../errors.ts';
 import { logger } from '../logger.ts';
 import { releaseStdin } from '../ui/input.ts';
+import { releaseScreen } from '../ui/screen.ts';
 import type { Router } from '../core/schema.ts';
 import type { EnvDelta, Provider } from '../providers/types.ts';
 
@@ -215,6 +216,14 @@ export function launch(target: LaunchTarget, spawnFn: SpawnFn = spawn): Promise<
       });
     }
 
+    // Two handovers, in this order: the frame, then the keyboard.
+    //
+    // If the dashboard is up, the child would otherwise inherit its alternate
+    // buffer — a buffer RouterFlip discards on exit, taking everything Claude Code
+    // printed with it. Leaving it first puts the child on the real terminal. Both
+    // calls are no-ops when nothing owns the terminal, so a plain
+    // `routerflip claude` writes nothing and leaves fd 0 as the shell set it.
+    releaseScreen();
     const reclaimStdin = releaseStdin();
 
     const cleanup = () => {

@@ -3,9 +3,9 @@
  *
  * Everything here is layout and key handling: every action delegates to the exact
  * command function the flag-driven CLI calls, so the two surfaces cannot drift
- * apart. The alternate screen is *suspended* rather than torn down around anything
- * that prints or prompts, which is what lets a form appear in the normal buffer
- * and the dashboard come back exactly as it was.
+ * apart. Anything that prints or prompts runs as an inline view *inside* the
+ * dashboard's own frame, which is blanked first — so one view is on screen at a
+ * time and the dashboard comes back exactly as it was.
  */
 import type { AppContext } from '../context.ts';
 import type { RouterView } from '../core/routers.ts';
@@ -14,7 +14,7 @@ import { isCancelled } from '../errors.ts';
 import { openInput, type InputSession } from '../ui/input.ts';
 import { isShortcut, type Key } from '../ui/keys.ts';
 import { blank, note, printError } from '../ui/output.ts';
-import { runScreen, withSuspendedScreen, type ScreenOutcome, type Viewport } from '../ui/screen.ts';
+import { runScreen, withInlineView, type ScreenOutcome, type Viewport } from '../ui/screen.ts';
 import { theme } from '../ui/theme.ts';
 import { bannerLines, emptyStateLines, keybar, routerListLines } from '../ui/views.ts';
 import { addCommand } from './add.ts';
@@ -33,8 +33,12 @@ interface DashboardResult {
 }
 
 /**
- * Waits for one keypress in the normal buffer, so output from an action can be
- * read before the full-screen view paints over it.
+ * Waits for one keypress, so output from an action can be read before the
+ * full-screen view paints over it.
+ *
+ * The session opened here sits on top of the dashboard's own, which is what keeps
+ * a single reader: only the topmost session is given keys, and this one is closed
+ * before the dashboard is handed back.
  */
 async function pressAnyKey(): Promise<void> {
   blank();
@@ -105,12 +109,13 @@ export async function dashboardCommand(ctx: AppContext): Promise<CommandResult> 
   };
 
   /**
-   * Runs a command in the normal buffer. A cancelled prompt is an ordinary
-   * outcome here — the dashboard stays open — and an error is shown in place
-   * rather than taking the whole process down.
+   * Runs a command as a view on top of the dashboard: the frame is blanked, the
+   * command draws into it, and the dashboard paints again once it returns. A
+   * cancelled prompt is an ordinary outcome here — the dashboard stays open — and
+   * an error is shown in place rather than taking the whole process down.
    */
   const inline = async (body: () => Promise<string | undefined>): Promise<undefined> => {
-    await withSuspendedScreen(async () => {
+    await withInlineView(async () => {
       try {
         status = await body();
         await pressAnyKey();
@@ -165,13 +170,13 @@ export async function dashboardCommand(ctx: AppContext): Promise<CommandResult> 
   };
 
   /**
-   * `Enter` runs the full `use` flow. Temporary mode replaces this process's
-   * screen with Claude Code's, so once the child exits there is nothing sensible
-   * to return to — the dashboard finishes with the child's exit code.
+   * `Enter` runs the full `use` flow. Temporary mode hands the terminal to Claude
+   * Code for good, so once the child exits there is nothing sensible to return to —
+   * the dashboard finishes with the child's exit code.
    */
   const onSelect = async (view: RouterView): Promise<ScreenOutcome<DashboardResult> | undefined> => {
     let launched: DashboardResult | undefined;
-    await withSuspendedScreen(async () => {
+    await withInlineView(async () => {
       try {
         const outcome = await useRouter(ctx, routerFor(view));
         if (outcome.launched) {
