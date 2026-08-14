@@ -1,0 +1,227 @@
+/**
+ * `routerflip use [name]` — pick a gateway, then pick how long the choice lasts.
+ *
+ * The two modes are deliberately very different animals:
+ *
+ *   temporary — spawns Claude Code with an environment built in memory. Nothing
+ *               on disk changes, and `process.env` of this process is never
+ *               touched (spec §5).
+ *   permanent — writes into Claude Code's own settings file, after a backup and
+ *               an explicit confirmation, touching only RouterFlip's own keys
+ *               (spec §6).
+ */
+import type { AppContext } from '../context.ts';
+import type { Router } from '../core/schema.ts';
+import { updateState } from '../core/store.ts';
+import { nowIso } from '../core/id.ts';
+import { RouterFlipError } from '../errors.ts';
+import { applyPermanent } from '../services/activation.ts';
+import { launchRouter } from '../services/launcher.ts';
+import type { PermanentStrategy } from '../providers/types.ts';
+import { isInteractive } from '../ui/input.ts';
+import { blank, heading, json, line, note, success, warning } from '../ui/output.ts';
+import { select } from '../ui/prompts.ts';
+import { theme } from '../ui/theme.ts';
+import { routerDetailLines } from '../ui/views.ts';
+import { confirmAction, pickRouter, routerJson, type CommandResult } from './shared.ts';
+
+const STRATEGIES: readonly PermanentStrategy[] = ['env', 'helper'];
+
+type Mode = 'temporary' | 'permanent' | 'cancel';
+
+/** Environment already set in this shell would win over a settings file. */
+function shadowingVars(ctx: AppContext, router: Router): string[] {
+  return ctx.provider.envKeys(router).filter((name) => {
+    const value = process.env[name];
+    return typeof value === 'string' && value.length > 0;
+  });
+}
+
+async function askMode(ctx: AppContext, router: Router): Promise<Mode> {
+  if (ctx.flags.bool('temporary')) return 'temporary';
+  if (ctx.flags.bool('permanent')) return 'permanent';
+
+  if (!isInteractive()) {
+    throw new RouterFlipError('BAD_USAGE', 'Choose how long this should apply: --temporary or --permanent.', {
+      hint: `Example: routerflip use ${router.name} --temporary`,
+      exitCode: 2,
+    });
+  }
+
+  const view = await ctx.service.view(router);
+  blank();
+  for (const row of routerDetailLines(view)) line(row);
+  blank();
+
+  return select<Mode>({
+    message: 'How should this router be used?',
+    options: [
+      {
+        label: 'Temporary',
+        value: 'temporary',
+        detail: 'Launch Claude Code with this gateway for one session. Nothing is saved.',
+      },
+      {
+        label: 'Permanent',
+        value: 'permanent',
+        detail: 'Write it into your Claude Code settings, with a backup first.',
+      },
+      { label: 'Cancel', value: 'cancel', detail: 'Leave everything as it is.' },
+    ],
+  });
+}
+
+/**
+ * Temporary mode. Returns the child's exit code so the wrapper is transparent:
+ * `routerflip use x --temporary` exits exactly as `claude` would have.
+ */
+export async function activateTemporary(
+  ctx: AppContext,
+  router: Router,
+  args: readonly string[] = [],
+): Promise<number> {
+  const apiKey = await ctx.service.apiKey(router);
+  const t = theme();
+
+  if (!ctx.json) {
+    blank();
+    note(`  ${t.accent('Temporary')} ${t.muted('— this affects the launched process only.')}`);
+    note(`  ${t.muted('Router')}   ${t.text(router.name)}`);
+    note(`  ${t.muted('Base URL')} ${t.dim(router.baseUrl)}`);
+    note(`  ${t.muted('Auth via')} ${t.dim(router.authEnvVar)}`);
+    blank();
+  }
+
+  // Recorded for `status` only. This is RouterFlip's own state file; no provider
+  // configuration and no environment outside the child is involved.
+  updateState((state) => ({ ...state, lastTemporaryRouterId: router.id, lastTemporaryAt: nowIso() }));
+
+  const result = await launchRouter({
+    router,
+    apiKey,
+    provider: ctx.provider,
+    args,
+  });
+  return result.code;
+}
+
+/** Permanent mode. Confirms, backs up, writes only RouterFlip's own keys. */
+export async function activatePermanent(ctx: AppContext, router: Router): Promise<CommandResult> {
+  const apiKey = await ctx.service.apiKey(router);
+  const strategy = ctx.flags.choice<PermanentStrategy>('strategy', STRATEGIES);
+  const snapshot = ctx.provider.inspect();
+  const t = theme();
+
+  const details = [
+    `Target file: ${snapshot.file}`,
+    `Sets: ${ctx.provider.envKeys(router).join(', ')}`,
+    // Say plainly where the secret ends up, before anything is written.
+    strategy === 'env' || ctx.provider.helperCommand?.(router) === undefined
+      ? 'The API key is written into that file in plain text, because no credential helper is available.'
+      : 'The API key stays in your OS credential store; the file only gets a command that fetches it.',
+    snapshot.exists
+      ? `A timestamped backup is written first. ${snapshot.preservedKeys.length} unrelated setting${snapshot.preservedKeys.length === 1 ? '' : 's'} will be preserved.`
+      : 'The file does not exist yet and will be created.',
+  ];
+  const approved = await confirmAction(ctx, {
+    message: `Make ${router.name} your permanent Claude Code gateway?`,
+    details,
+    confirmLabel: 'Apply',
+  });
+  if (!approved) {
+    if (!ctx.json) note('  Nothing was changed.');
+    return 0;
+  }
+
+  const outcome = applyPermanent({
+    router,
+    apiKey,
+    provider: ctx.provider,
+    ...(strategy ? { strategy } : {}),
+    backupRetention: ctx.config.settings.backupRetention,
+  });
+  ctx.service.setActive(router.id);
+
+  const shadowed = shadowingVars(ctx, router);
+
+  if (ctx.json) {
+    const view = await ctx.service.view(router);
+    json({
+      ok: true,
+      mode: 'permanent',
+      router: routerJson(view),
+      targetFile: outcome.result.targetFile,
+      strategy: outcome.result.strategy,
+      managedKeys: outcome.result.managedKeys,
+      preservedKeys: outcome.result.preservedKeys,
+      ...(outcome.result.backup ? { backup: outcome.result.backup } : {}),
+      strategyDowngraded: outcome.strategyDowngraded,
+      shadowedBy: shadowed,
+    });
+    return 0;
+  }
+
+  blank();
+  success(`Claude Code now uses "${router.name}".`);
+  blank();
+  line(`  ${t.muted('Written to')}`);
+  line(`  ${outcome.result.targetFile}`);
+  blank();
+  line(`  ${t.muted('Managed keys')}`);
+  line(`  ${t.dim(outcome.result.managedKeys.join(', '))}`);
+  if (outcome.result.backup) {
+    blank();
+    line(`  ${t.muted('Backup')}`);
+    line(`  ${t.dim(outcome.result.backup)}`);
+  }
+  if (outcome.result.preservedKeys.length > 0) {
+    blank();
+    line(`  ${t.muted('Preserved untouched')}`);
+    line(`  ${t.dim(outcome.result.preservedKeys.join(', '))}`);
+  }
+  blank();
+
+  if (outcome.strategyDowngraded) {
+    warning('The credential-helper strategy needs `routerflip` on your PATH, so the key was written into the settings file instead.');
+    note(`  ${t.dim('Install RouterFlip globally (npm i -g routerflip) and re-run with --strategy helper to keep the key in your OS credential store.')}`);
+    blank();
+  } else if (outcome.result.strategy === 'env') {
+    // Not a warning — it is the documented fallback — but the user should know
+    // the key is now readable in that file.
+    note(`  ${t.dim('The API key is stored in that file in plain text. Install RouterFlip on your PATH and re-apply to keep it in your OS credential store instead.')}`);
+    blank();
+  }
+  if (shadowed.length > 0) {
+    warning(`${shadowed.join(' and ')} ${shadowed.length === 1 ? 'is' : 'are'} already set in this shell and would override the saved settings.`);
+    note(`  ${t.dim('Unset them, or open a new terminal, so Claude Code picks up the new gateway.')}`);
+    blank();
+  }
+  note(`  ${t.dim('Undo at any time with `routerflip deactivate`.')}`);
+  return 0;
+}
+
+export interface UseOutcome {
+  readonly exitCode: number;
+  /** True when a child process was launched and has already finished. */
+  readonly launched: boolean;
+}
+
+/** The `use` flow for a router that has already been chosen. */
+export async function useRouter(ctx: AppContext, router: Router): Promise<UseOutcome> {
+  const mode = await askMode(ctx, router);
+
+  if (mode === 'cancel') {
+    if (!ctx.json) note('  Cancelled. Nothing was changed.');
+    return { exitCode: 0, launched: false };
+  }
+  if (mode === 'temporary') {
+    return { exitCode: await activateTemporary(ctx, router, ctx.rest), launched: true };
+  }
+  const result = await activatePermanent(ctx, router);
+  return { exitCode: typeof result === 'number' ? result : 0, launched: false };
+}
+
+export async function useCommand(ctx: AppContext): Promise<CommandResult> {
+  const router = await pickRouter(ctx, 'Which router should Claude Code use?');
+  return (await useRouter(ctx, router)).exitCode;
+}
