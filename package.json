@@ -51,9 +51,11 @@
     "start": "node --experimental-strip-types src/cli.ts",
     "prepublishOnly": "npm run check && npm run clean && npm run build"
   },
-  "dependencies": {},
+  "dependencies": {
+    "routerflip": "^1.0.0"
+  },
   "devDependencies": {
-    "typescript": "^5.9.2",
-    "@types/node": "^22.15.0"
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2"
   }
 }
