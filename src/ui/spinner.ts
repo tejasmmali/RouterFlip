@@ -82,19 +82,6 @@ export class Spinner {
   }
 }
 
-/** Runs `work` with a spinner, resolving to its value. Always clears the line. */
-export async function withSpinner<T>(text: string, work: () => Promise<T>): Promise<T> {
-  const spinner = new Spinner(text).start();
-  try {
-    const value = await work();
-    spinner.stop();
-    return value;
-  } catch (error) {
-    spinner.stop();
-    throw error;
-  }
-}
-
 export type StepState = 'pending' | 'running' | 'ok' | 'fail' | 'warn';
 
 export interface Step {

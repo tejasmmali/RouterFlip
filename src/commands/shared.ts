@@ -145,6 +145,10 @@ export function routerJson(view: RouterView): Record<string, unknown> {
     accountCount: view.accountCount,
     ...(view.activeAccountId ? { activeAccountId: view.activeAccountId } : {}),
     ...(view.activeAccountName ? { activeAccountName: view.activeAccountName } : {}),
+    // The list is the router's; `model` is what the *selected* account would launch
+    // with, so a script can read both halves of the choice from one object.
+    models: [...view.models],
+    ...(view.model ? { model: view.model } : {}),
     authEnvVar: view.authEnvVar,
     provider: view.provider,
     isActive: view.isActive,
@@ -162,6 +166,9 @@ export function accountJson(view: AccountView): Record<string, unknown> {
     apiKey: view.maskedKey,
     hasKey: view.hasKey,
     isActive: view.isActive,
+    // Absent means "the provider's own default" rather than a missing value, so it
+    // is only present once this account has actually chosen.
+    ...(view.model ? { model: view.model } : {}),
     createdAt: view.createdAt,
     updatedAt: view.updatedAt,
   };

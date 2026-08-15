@@ -31,6 +31,7 @@ import { addCommand } from './add.ts';
 import { deleteCommand } from './delete.ts';
 import { editCommand } from './edit.ts';
 import { listCommand } from './list.ts';
+import { chooseModel } from './models.ts';
 import { runTest } from './test.ts';
 import { useRouter } from './use.ts';
 import type { CommandResult } from './shared.ts';
@@ -222,12 +223,19 @@ export async function dashboardCommand(ctx: AppContext): Promise<CommandResult> 
    * command draws into it, and the dashboard paints again once it returns. A
    * cancelled prompt is an ordinary outcome here — the dashboard stays open — and
    * an error is shown in place rather than taking the whole process down.
+   *
+   * `pause: false` skips the "press any key" step for an action whose whole result
+   * fits in the footer line, so a quick change costs one keypress rather than two.
+   * A *failure* always pauses regardless: an error nobody read is an error lost.
    */
-  const inline = async (body: () => Promise<string | undefined>): Promise<undefined> => {
+  const inline = async (
+    body: () => Promise<string | undefined>,
+    options: { readonly pause?: boolean } = {},
+  ): Promise<undefined> => {
     await withInlineView(async () => {
       try {
         status = await body();
-        await pressAnyKey();
+        if (options.pause !== false) await pressAnyKey();
       } catch (error) {
         if (isCancelled(error)) {
           status = 'Cancelled. Nothing was changed.';
@@ -348,6 +356,29 @@ export async function dashboardCommand(ctx: AppContext): Promise<CommandResult> 
     });
 
   /**
+   * `M` opens the model picker for the account under the cursor — the same picker
+   * the `use` action screen opens, so a model can be changed without launching
+   * anything.
+   *
+   * Bound on this screen only. The router list has no account to remember a choice
+   * on, and every text prompt (a name, a key) routes printable keys to its own
+   * editor, so `M` cannot mean "change model" anywhere a character is being typed.
+   */
+  const onModelAccount = (view: AccountView): Promise<undefined> =>
+    inline(
+      async () => {
+        const router = ownerRouter();
+        if (!router) return undefined;
+        const account = ctx.service.findAccount(router, view.id);
+        if (!account) return undefined;
+        // `status` carries the outcome, which is why nothing pauses here: the
+        // dashboard's own footer is the confirmation.
+        return (await chooseModel(ctx, router, account)).status;
+      },
+      { pause: false },
+    );
+
+  /**
    * Enter on an account selects *both* halves — router and credential — and then
    * runs the ordinary `use` flow with them, which is where Temporary/Permanent is
    * chosen.
@@ -397,6 +428,7 @@ export async function dashboardCommand(ctx: AppContext): Promise<CommandResult> 
     if (key.name === 'enter') return onSelectAccount(view);
     if (isShortcut(key, 'e')) return onEditAccount(view);
     if (isShortcut(key, 'd')) return onDeleteAccount(view);
+    if (isShortcut(key, 'm')) return onModelAccount(view);
     return undefined;
   };
 

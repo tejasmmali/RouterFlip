@@ -98,12 +98,32 @@ export interface SelectOption<T> {
   readonly shortcut?: string;
 }
 
+/**
+ * A key that resolves the prompt with a value of its own without occupying a row.
+ *
+ * This is deliberately a feature of `select` alone. A text prompt gives every
+ * printable key to its editor (see `LineEditor.handle`), so a hotkey declared here
+ * *cannot* fire while the user is typing a name or pasting a key — the guarantee is
+ * structural rather than a condition someone has to remember to write.
+ */
+export interface SelectHotkey<T> {
+  /** Single letter, matched case-insensitively and only without Ctrl/Alt. */
+  readonly key: string;
+  readonly value: T;
+  /** Name for the summary line left behind. Defaults to the key itself. */
+  readonly label?: string;
+}
+
 export interface SelectPromptOptions<T> {
   readonly message: string;
   readonly options: readonly SelectOption<T>[];
   readonly initial?: number;
   /** Footer hint line. Pass '' to omit. */
   readonly help?: string;
+  /** Lines shown between the message and the list, e.g. "Current model: …". */
+  readonly details?: readonly string[];
+  /** Extra keys that resolve the prompt, shown in `help` rather than as rows. */
+  readonly hotkeys?: readonly SelectHotkey<T>[];
 }
 
 export async function select<T>(options: SelectPromptOptions<T>): Promise<T> {
@@ -124,6 +144,7 @@ export async function select<T>(options: SelectPromptOptions<T>): Promise<T> {
 
   const render = (): string[] => {
     const out = [t.bold(options.message), ''];
+    if (options.details && options.details.length > 0) out.push(...options.details, '');
     items.forEach((item, index) => {
       const focused = index === cursor;
       const pointer = focused ? t.accent(g.pointer) : ' ';
@@ -167,11 +188,16 @@ export async function select<T>(options: SelectPromptOptions<T>): Promise<T> {
         const item = items[shortcutIndex];
         if (item && !item.disabled) return { done: true, value: item.value };
       }
+      // Last, so a row's own shortcut always wins over a screen-level hotkey.
+      const hotkey = options.hotkeys?.find((entry) => isShortcut(key, entry.key));
+      if (hotkey) return { done: true, value: hotkey.value };
       return { done: false };
     },
     summary: (value) => {
       const chosen = items.find((item) => item.value === value);
-      return [`${t.muted(options.message)} ${t.accent(chosen?.label ?? '')}`];
+      if (chosen) return [`${t.muted(options.message)} ${t.accent(chosen.label)}`];
+      const hotkey = options.hotkeys?.find((entry) => entry.value === value);
+      return [`${t.muted(options.message)} ${t.accent(hotkey?.label ?? hotkey?.key.toUpperCase() ?? '')}`];
     },
   });
 }

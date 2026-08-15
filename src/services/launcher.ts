@@ -14,6 +14,9 @@
  * the interesting logic is unit-testable without launching anything.
  */
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { RouterFlipError, describeCause } from '../errors.ts';
 import { logger } from '../logger.ts';
 import { releaseStdin } from '../ui/input.ts';
@@ -262,6 +265,12 @@ export interface LaunchRouterOptions {
   readonly apiKey: string;
   readonly provider: Provider;
   readonly args?: readonly string[];
+  /**
+   * Model the chosen account launches with, when it has one. Optional throughout:
+   * with no model the child environment is byte-for-byte what it was before models
+   * existed, so nothing is ever set on a guess.
+   */
+  readonly model?: string;
   /** Resolved executable. Pass to skip a second PATH lookup. */
   readonly executable?: string;
   readonly spawnFn?: SpawnFn;
@@ -283,14 +292,37 @@ export async function launchRouter(options: LaunchRouterOptions): Promise<Launch
   }
 
   logger.protect(apiKey);
-  const env = buildChildEnv(options.baseEnv ?? process.env, provider.envFor(router, apiKey), provider.conflicts(router));
-  logger.debug(`launching ${executable} for router ${router.id} (temporary)`);
-  return launch(
-    {
-      executable,
-      args: options.args ?? [],
-      env,
-    },
-    options.spawnFn ?? spawn,
+  const env = buildChildEnv(
+    options.baseEnv ?? process.env,
+    provider.envFor(router, apiKey, options.model),
+    provider.conflicts(router),
   );
+
+  // Some CLIs (Claude Code >= 2.0.1) apply their own settings file over the
+  // inherited environment, so `env` alone would lose to a permanent gateway. When
+  // the provider offers a runtime override, write it to a private temp file and
+  // load it via the provider's own flag — deleted the moment the child is gone.
+  const override = provider.temporaryOverride?.(router, apiKey, options.model);
+  const overrideFile = override ? writeTempSettings(override.settings) : undefined;
+  const args = [...(overrideFile ? override!.args(overrideFile) : []), ...(options.args ?? [])];
+
+  logger.debug(`launching ${executable} for router ${router.id} (temporary)`);
+  try {
+    return await launch({ executable, args, env }, options.spawnFn ?? spawn);
+  } finally {
+    if (overrideFile) rmSync(join(overrideFile, '..'), { recursive: true, force: true });
+  }
+}
+
+/**
+ * Writes a temporary settings file for the child to load. Created inside a
+ * per-launch directory with owner-only permissions, because it holds the key in
+ * plaintext for the life of the child — the same exposure permanent mode's `env`
+ * strategy accepts, but this one is deleted as soon as the child exits.
+ */
+function writeTempSettings(settings: unknown): string {
+  const dir = mkdtempSync(join(tmpdir(), 'routerflip-'));
+  const file = join(dir, 'settings.json');
+  writeFileSync(file, JSON.stringify(settings), { mode: 0o600 });
+  return file;
 }

@@ -56,18 +56,6 @@ export function rule(width: number, indent = 2): string {
   return ' '.repeat(indent) + theme().border(g.boxHorizontal.repeat(Math.max(1, width - indent * 2)));
 }
 
-/** A `LABEL` heading in the dashboard's section style. */
-export function sectionHeading(label: string, indent = 2): string {
-  return ' '.repeat(indent) + theme().dim(theme().bold(label.toUpperCase()));
-}
-
-/** Label above value, the layout used across `current`, `test` and forms. */
-export function fieldBlock(label: string, value: string, indent = 0): string[] {
-  const t = theme();
-  const prefix = ' '.repeat(indent);
-  return [`${prefix}${t.muted(label)}`, `${prefix}${value}`];
-}
-
 export interface TableColumn {
   readonly header: string;
   readonly align?: 'left' | 'right';

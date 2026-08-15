@@ -122,9 +122,3 @@ export function terminalWidth(fallback = 80): number {
   if (!columns || Number.isNaN(columns)) return fallback;
   return Math.max(40, Math.min(columns, 120));
 }
-
-export function terminalHeight(fallback = 24): number {
-  const rows = process.stdout.rows;
-  if (!rows || Number.isNaN(rows)) return fallback;
-  return Math.max(10, rows);
-}

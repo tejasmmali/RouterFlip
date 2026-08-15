@@ -41,10 +41,18 @@ import type {
   Provider,
   ProviderConfigSnapshot,
   ProviderDetection,
+  TemporaryOverride,
 } from './types.ts';
 
 const BASE_URL_KEY = 'ANTHROPIC_BASE_URL';
 const HELPER_KEY = 'apiKeyHelper';
+/**
+ * Model override. Present in the `claude` executable alongside the variables
+ * above, and honoured from `settings.env` the same way — so pinning a model needs
+ * no mechanism of its own. Only ever set when an account has actually chosen one:
+ * absent, Claude Code keeps applying its own default.
+ */
+const MODEL_KEY = 'ANTHROPIC_MODEL';
 const ENV_BLOCK = 'env';
 
 type Settings = Record<string, unknown>;
@@ -116,8 +124,14 @@ class ClaudeCodeProvider implements Provider {
     };
   }
 
-  envFor(router: Router, apiKey: string): EnvDelta {
-    return { [BASE_URL_KEY]: router.baseUrl, [router.authEnvVar]: apiKey };
+  envFor(router: Router, apiKey: string, model?: string): EnvDelta {
+    return {
+      [BASE_URL_KEY]: router.baseUrl,
+      [router.authEnvVar]: apiKey,
+      // Nothing is set on a guess: no model chosen means no model variable, and
+      // the child sees exactly the environment it saw before models existed.
+      ...(model ? { [MODEL_KEY]: model } : {}),
+    };
   }
 
   conflicts(router: Router): readonly string[] {
@@ -125,8 +139,23 @@ class ClaudeCodeProvider implements Provider {
     return AUTH_ENV_VARS.filter((name) => name !== router.authEnvVar);
   }
 
-  envKeys(router: Router): readonly string[] {
-    return [BASE_URL_KEY, router.authEnvVar];
+  /**
+   * Claude Code >= 2.0.1 applies the `env` block from `settings.json` *over* the
+   * inherited process environment, so a permanent gateway written there wins over
+   * anything temporary mode puts in the child env. `--settings <file>` is loaded
+   * at a higher precedence than the user settings file, so it is how a temporary
+   * router actually reaches the CLI. The competing auth variable is blanked (not
+   * just omitted) so a value the permanent file set cannot shadow ours.
+   */
+  temporaryOverride(router: Router, apiKey: string, model?: string): TemporaryOverride {
+    const env: Record<string, string> = { ...this.envFor(router, apiKey, model) };
+    for (const name of this.conflicts(router)) env[name] = '';
+    logger.protect(apiKey);
+    return { settings: { env }, args: (file) => ['--settings', file] };
+  }
+
+  envKeys(router: Router, model?: string): readonly string[] {
+    return [BASE_URL_KEY, router.authEnvVar, ...(model ? [MODEL_KEY] : [])];
   }
 
   configFile(): string {
@@ -149,7 +178,9 @@ class ClaudeCodeProvider implements Provider {
       ...(baseUrl ? { baseUrl } : {}),
       ...(authEnvVar ? { authEnvVar } : {}),
       hasAuth: Boolean(authEnvVar) || Boolean(helper && helper.length > 0),
-      otherEnvKeys: Object.keys(env).filter((key) => key !== BASE_URL_KEY && !AUTH_ENV_VARS.includes(key as never)),
+      otherEnvKeys: Object.keys(env).filter(
+        (key) => key !== BASE_URL_KEY && key !== MODEL_KEY && !AUTH_ENV_VARS.includes(key as never),
+      ),
       preservedKeys: Object.keys(settings).filter((key) => key !== ENV_BLOCK && key !== HELPER_KEY),
     };
   }
@@ -178,7 +209,10 @@ class ClaudeCodeProvider implements Provider {
     }
 
     const authPath = strategy === 'helper' ? HELPER_KEY : `${ENV_BLOCK}.${router.authEnvVar}`;
-    const managedKeys = [`${ENV_BLOCK}.${BASE_URL_KEY}`, authPath];
+    const modelPath = `${ENV_BLOCK}.${MODEL_KEY}`;
+    // The model is managed only while one is selected. Absent, it is not in this
+    // list, so `clearPermanent` never claims to own a value we did not write.
+    const managedKeys = [`${ENV_BLOCK}.${BASE_URL_KEY}`, authPath, ...(options.model ? [modelPath] : [])];
 
     // Whether a key predates RouterFlip is decided once, on the first apply, and
     // then carried forward — after our own write the answer would always be yes.
@@ -209,6 +243,15 @@ class ClaudeCodeProvider implements Provider {
       if (options.previous?.managedKeys.includes(HELPER_KEY) && preexisting[HELPER_KEY] === 'no') {
         delete next[HELPER_KEY];
       }
+    }
+
+    if (options.model) {
+      nextEnv[MODEL_KEY] = options.model;
+    } else if (options.previous?.managedKeys.includes(modelPath) && preexisting[modelPath] === 'no') {
+      // The last apply pinned a model and this one does not. Leaving the key would
+      // keep an unchosen model in force, so the one we added is retired — exactly
+      // how a strategy change retires the auth key it replaces.
+      delete nextEnv[MODEL_KEY];
     }
 
     next[ENV_BLOCK] = nextEnv;
@@ -297,8 +340,12 @@ export const claudeCode: Provider = new ClaudeCodeProvider();
  * `account` is recorded by name as well as by id: `current` has to be able to
  * say which account is live without loading config.json, and an id alone is not
  * something a person recognises.
+ *
+ * `model` is recorded for the same reason, and only when one was actually pinned —
+ * an activation with no model is not missing information, it is an activation that
+ * left the provider's own default alone.
  */
-export function activationFrom(router: Router, result: ApplyResult, account?: Account): Activation {
+export function activationFrom(router: Router, result: ApplyResult, account?: Account, model?: string): Activation {
   return {
     routerId: router.id,
     routerName: router.name,
@@ -308,6 +355,7 @@ export function activationFrom(router: Router, result: ApplyResult, account?: Ac
     managedKeys: [...result.managedKeys],
     preexisting: result.preexisting,
     ...(account ? { accountId: account.id, accountName: account.name } : {}),
+    ...(model ? { model } : {}),
     ...(result.originBackup ? { originBackup: result.originBackup } : {}),
     ...(result.backup ? { lastBackup: result.backup } : {}),
   };

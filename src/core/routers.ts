@@ -20,13 +20,16 @@ import {
   credentialRefOf,
   credentialRefsOf,
   findAccount,
+  findModel,
   nextAccountIdentity,
+  withModel,
 } from './accounts.ts';
 import { credentialRefFor, normalizeName, nowIso, sameName, uniqueId } from './id.ts';
 import { maskSecret } from './mask.ts';
 import { loadConfig, loadState, saveConfig, saveState } from './store.ts';
 import {
   accountNameProblem,
+  modelNameProblem,
   routerNameProblem,
   type Account,
   type AuthEnvVar,
@@ -80,6 +83,8 @@ export interface AccountView {
   readonly hasKey: boolean;
   /** True when this is the account the router will authenticate with. */
   readonly isActive: boolean;
+  /** Model this account last chose, if any. Absent means "the provider default". */
+  readonly model?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -96,6 +101,10 @@ export interface RouterView {
   readonly accountCount: number;
   readonly activeAccountId?: string;
   readonly activeAccountName?: string;
+  /** Models this router offers, shared by all of its accounts. */
+  readonly models: readonly string[];
+  /** Model the *selected* account would launch with, if it has chosen one. */
+  readonly model?: string;
   readonly authEnvVar: AuthEnvVar;
   readonly provider: ProviderId;
   readonly isActive: boolean;
@@ -205,6 +214,9 @@ export class RouterService {
       credentialRef: credentialRefFor(id),
       accounts: [account],
       activeAccount: account.id,
+      // No models are assumed: choosing one is optional, and a router starts out
+      // launching with whatever default the provider already has.
+      models: [],
       description: (input.description ?? '').trim(),
       provider: input.provider ?? 'claude-code',
       authEnvVar: input.authEnvVar ?? 'ANTHROPIC_API_KEY',
@@ -335,6 +347,8 @@ export class RouterService {
       hasKey: Boolean(key),
       accountCount: router.accounts.length,
       ...(selected ? { activeAccountId: selected.id, activeAccountName: selected.name } : {}),
+      models: router.models,
+      ...(selected?.model ? { model: selected.model } : {}),
       authEnvVar: router.authEnvVar,
       provider: router.provider,
       isActive: this.#config.activeRouter === router.id,
@@ -522,6 +536,7 @@ export class RouterService {
       maskedKey: maskSecret(key),
       hasKey: Boolean(key),
       isActive: selected?.id === account.id,
+      ...(account.model ? { model: account.model } : {}),
       createdAt: account.createdAt,
       updatedAt: account.updatedAt,
     };
@@ -530,5 +545,125 @@ export class RouterService {
   async accountViews(router: Router): Promise<AccountView[]> {
     await this.#credentials.presence(router.accounts.map((account) => account.credentialRef));
     return Promise.all(router.accounts.map((account) => this.accountView(router, account)));
+  }
+
+  // ── Models ────────────────────────────────────────────────────────────────
+  //
+  // The list belongs to the router (it describes the endpoint) and the selection
+  // belongs to the account (it is that credential's last choice). Both are
+  // non-secret, so both live in config.json alongside everything else here, and
+  // both go through `#writeRouter`.
+
+  /** The model this pair would launch with, or undefined when none was chosen. */
+  modelOf(router: Router, account?: Account): string | undefined {
+    return (account ?? activeAccount(router))?.model;
+  }
+
+  /**
+   * Like `findModel`, but throws listing the models that do exist.
+   *
+   * Used for `--model` on a router whose list does not contain it: guessing would
+   * either add an unintended entry or launch with a model the gateway rejects.
+   */
+  resolveModel(router: Router, nameOrPosition: string): string {
+    const found = findModel(router, nameOrPosition);
+    if (found !== undefined) return found;
+    if (router.models.length === 0) {
+      throw new RouterFlipError('ROUTER_NOT_FOUND', `"${router.name}" has no models configured yet.`, {
+        hint: `Add this one with \`routerflip models ${router.name} add "${nameOrPosition}"\`.`,
+      });
+    }
+    throw new RouterFlipError('ROUTER_NOT_FOUND', `"${router.name}" has no model called "${nameOrPosition}".`, {
+      hint: `Models: ${router.models.join(', ')}`,
+    });
+  }
+
+  /** Validates a model name the way the schema will when it is saved. */
+  assertModelValid(name: string): void {
+    const value = normalizeName(name);
+    if (value.length === 0) throw new RouterFlipError('ROUTER_INVALID', 'A model name is required.');
+    if (value.length > 100) throw new RouterFlipError('ROUTER_INVALID', 'A model name must be at most 100 characters.');
+    const problem = modelNameProblem(value);
+    if (problem) throw new RouterFlipError('ROUTER_INVALID', problem);
+  }
+
+  /**
+   * Adds a model to the router's list, or returns it unchanged when an equal name
+   * is already there — so offering the same model twice is a no-op rather than a
+   * duplicate row in the picker.
+   */
+  addModel(routerId: string, name: string): { readonly router: Router; readonly model: string } {
+    const router = this.resolve(routerId);
+    this.assertModelValid(name);
+    const model = normalizeName(name);
+    const existing = findModel(router, model);
+    if (existing !== undefined) return { router, model: existing };
+    this.#writeRouter({ ...router, models: [...withModel(router.models, model)], updatedAt: nowIso() });
+    const updated = this.resolve(router.id);
+    logger.debug(`model added: ${updated.id}/${model}`);
+    return { router: updated, model };
+  }
+
+  /** Removes a model from the router's list and from every account that chose it. */
+  removeModel(routerId: string, name: string): { readonly router: Router; readonly model: string } {
+    const router = this.resolve(routerId);
+    const model = this.resolveModel(router, name);
+    const timestamp = nowIso();
+    this.#writeRouter({
+      ...router,
+      models: router.models.filter((entry) => entry !== model),
+      // An account must never be left remembering a model the router no longer
+      // offers: it would launch with something the picker cannot show.
+      accounts: router.accounts.map((account) => {
+        if (account.model !== model) return account;
+        const { model: _dropped, ...rest } = account;
+        return { ...rest, updatedAt: timestamp };
+      }),
+      updatedAt: timestamp,
+    });
+    const updated = this.resolve(router.id);
+    logger.debug(`model removed: ${updated.id}/${model}`);
+    return { router: updated, model };
+  }
+
+  /**
+   * Remembers the model an account last chose, adding it to the router's list when
+   * it is new. Passing `undefined` clears the selection, which is a legitimate
+   * choice: model selection is optional throughout.
+   */
+  setAccountModel(
+    routerId: string,
+    accountId: string,
+    name: string | undefined,
+  ): { readonly router: Router; readonly account: Account; readonly model?: string } {
+    const router = this.resolve(routerId);
+    const existing = this.resolveAccount(router, accountId);
+    const timestamp = nowIso();
+
+    if (name === undefined) {
+      const { model: _cleared, ...rest } = existing;
+      const account: Account = { ...rest, updatedAt: timestamp };
+      this.#writeRouter({
+        ...router,
+        accounts: router.accounts.map((entry) => (entry.id === account.id ? account : entry)),
+        updatedAt: timestamp,
+      });
+      logger.debug(`model cleared: ${router.id}/${account.id}`);
+      return { router: this.resolve(router.id), account };
+    }
+
+    this.assertModelValid(name);
+    // Selecting a model the router has never offered registers it there too: the
+    // list is the router's, so a choice made once is available to its siblings.
+    const model = findModel(router, normalizeName(name)) ?? normalizeName(name);
+    const account: Account = { ...existing, model, updatedAt: timestamp };
+    this.#writeRouter({
+      ...router,
+      models: [...withModel(router.models, model)],
+      accounts: router.accounts.map((entry) => (entry.id === account.id ? account : entry)),
+      updatedAt: timestamp,
+    });
+    logger.debug(`model selected: ${router.id}/${account.id} → ${model}`);
+    return { router: this.resolve(router.id), account, model };
   }
 }

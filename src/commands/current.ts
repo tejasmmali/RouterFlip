@@ -42,7 +42,15 @@ export async function currentCommand(ctx: AppContext): Promise<CommandResult> {
       ok: true,
       router: view ? routerJson(view) : null,
       // A mask, never a key — this is the same projection `list --json` uses.
-      account: view && account ? { id: account.id, name: account.name, apiKey: view.maskedKey } : null,
+      account:
+        view && account
+          ? {
+              id: account.id,
+              name: account.name,
+              apiKey: view.maskedKey,
+              ...(account.model ? { model: account.model } : {}),
+            }
+          : null,
       mode,
       permanent: activation
         ? {

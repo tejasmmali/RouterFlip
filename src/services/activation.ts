@@ -24,6 +24,12 @@ export interface ApplyPermanentInput {
   readonly backupRetention?: number;
   /** The account `apiKey` came from, so the record names it and the helper fetches it. */
   readonly account?: Account;
+  /**
+   * Model to pin, when the account has chosen one. Omitted, the provider manages no
+   * model key and Claude Code's own default keeps applying — and a model pinned by
+   * an earlier apply is retired rather than left silently in force.
+   */
+  readonly model?: string;
 }
 
 export interface ApplyPermanentOutcome {
@@ -50,10 +56,11 @@ export function applyPermanent(input: ApplyPermanentInput): ApplyPermanentOutcom
     strategy: requested,
     ...(input.backupRetention === undefined ? {} : { backupRetention: input.backupRetention }),
     ...(input.account ? { account: input.account } : {}),
+    ...(input.model ? { model: input.model } : {}),
     ...(previous && previous.provider === input.router.provider ? { previous } : {}),
   });
 
-  const activation = activationFrom(input.router, result, input.account);
+  const activation = activationFrom(input.router, result, input.account, input.model);
   const state = loadState();
   saveState({ ...state, activation, lastUsedRouterId: input.router.id });
   logger.debug(`permanent activation recorded for ${input.router.id}`);

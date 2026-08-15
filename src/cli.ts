@@ -27,6 +27,7 @@ import { doctorCommand } from './commands/doctor.ts';
 import { editCommand } from './commands/edit.ts';
 import { helpCommand, versionCommand } from './commands/help.ts';
 import { listCommand } from './commands/list.ts';
+import { modelsCommand } from './commands/models.ts';
 import { runCommand } from './commands/run.ts';
 import { statusCommand } from './commands/status.ts';
 import { testCommand } from './commands/test.ts';
@@ -46,6 +47,8 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
   ls: listCommand,
   accounts: accountsCommand,
   account: accountsCommand,
+  models: modelsCommand,
+  model: modelsCommand,
   use: useCommand,
   switch: useCommand,
   claude: runCommand,

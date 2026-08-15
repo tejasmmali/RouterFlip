@@ -39,6 +39,7 @@ const VALUE_FLAGS = [
   'auth-env',
   'router',
   'account',
+  'model',
   'shell',
   'timeout',
 ] as const;
@@ -53,6 +54,7 @@ const ALIASES: Readonly<Record<string, string>> = {
   p: 'permanent',
   r: 'router',
   a: 'account',
+  m: 'model',
   n: 'name',
   u: 'url',
   d: 'description',

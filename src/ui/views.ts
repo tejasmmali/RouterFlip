@@ -66,11 +66,15 @@ export function routerRow(view: RouterView, focused: boolean): string[] {
   else if (!view.hasKey) tags.push(t.warning('no key'));
   const suffix = tags.length > 0 ? `  ${t.dim('[')}${tags.join(t.dim(', '))}${t.dim(']')}` : '';
   const count = view.accountCount > 1 ? `    ${t.dim(`${view.accountCount} accounts`)}` : '';
-  // Which account is selected only matters when there is a choice to be made.
-  const selected =
-    view.accountCount > 1 && view.activeAccountName
-      ? `  ${t.dim('·')}  ${t.muted(view.activeAccountName)} ${t.dim(view.maskedKey)}`
-      : '';
+  // Which account is selected only matters when there is a choice to be made. The
+  // model is shown whenever one is chosen, because it changes what a launch does —
+  // and a router that has never chosen one keeps exactly its old single-line shape.
+  const trailing: string[] = [];
+  if (view.accountCount > 1 && view.activeAccountName) {
+    trailing.push(`${t.muted(view.activeAccountName)} ${t.dim(view.maskedKey)}`);
+  }
+  if (view.model) trailing.push(t.muted(view.model));
+  const selected = trailing.map((bit) => `  ${t.dim('·')}  ${bit}`).join('');
   return [`  ${pointer} ${dot(view)} ${name}${count}${suffix}`, `        ${t.dim(view.baseUrl)}${selected}`];
 }
 
@@ -131,6 +135,10 @@ export function routerDetailLines(view: RouterView, indent = 2): string[] {
     ...field('API Key', view.hasKey ? t.dim(view.maskedKey) : t.warning('not stored')),
   ];
   if (view.description) out.push('', ...field('Description', view.description));
+  // Only mentioned once models are in play: a router that has never offered one
+  // launches with the provider's own default, and saying so every time is noise.
+  if (view.model) out.push('', ...field('Model', t.text(view.model)));
+  else if (view.models.length > 0) out.push('', ...field('Model', t.dim('none selected')));
   out.push('', ...field('Auth variable', t.dim(view.authEnvVar)));
   return out;
 }
@@ -171,6 +179,7 @@ export function accountKeybar(): string {
     ['A', 'Add Account'],
     ['E', 'Edit'],
     ['D', 'Delete'],
+    ['M', 'Model'],
     ['B', 'Back'],
   ];
   return entries.map(([key, label]) => `${t.accent(key)} ${t.muted(label)}`).join('  ');
@@ -194,8 +203,9 @@ export function accountRow(view: AccountView, focused: boolean): string[] {
   if (!view.hasKey) tags.push(t.warning('no key'));
   const suffix = tags.length > 0 ? `  ${t.dim('[')}${tags.join(t.dim(', '))}${t.dim(']')}` : '';
   // The mask, never the key: this row is on screen whenever the screen is.
+  const model = view.model ? `  ${t.dim('·')}  ${t.muted(view.model)}` : '';
   const description = view.description ? `  ${t.dim('·')}  ${t.muted(view.description)}` : '';
-  return [`  ${pointer} ${marker} ${name}${suffix}`, `        ${t.dim(view.maskedKey)}${description}`];
+  return [`  ${pointer} ${marker} ${name}${suffix}`, `        ${t.dim(view.maskedKey)}${model}${description}`];
 }
 
 export function accountListLines(views: readonly AccountView[], cursor = -1): string[] {
@@ -234,6 +244,9 @@ export function accountDetailLines(view: AccountView, indent = 2): string[] {
     ...field('API Key', view.hasKey ? t.dim(view.maskedKey) : t.warning('not stored')),
   ];
   if (view.description) out.push('', ...field('Description', view.description));
+  // Absent means "whatever the provider defaults to", which is a legitimate state
+  // rather than a gap, so nothing is printed for an account that has not chosen.
+  if (view.model) out.push('', ...field('Model', t.text(view.model)));
   return out;
 }
 

@@ -86,3 +86,31 @@ export function nextAccountIdentity(router: Router, name: string): { readonly id
 export function accountLabel(router: Router, account: Account): string {
   return `${router.name} / ${account.name}`;
 }
+
+// ── Models ──────────────────────────────────────────────────────────────────
+//
+// The list of models belongs to the *router*: it describes what the endpoint
+// serves, so every account of that router offers the same choices. Which one was
+// chosen last is remembered on the *account*, because that is a preference of the
+// credential's owner. Neither is a secret, so both live in config.json.
+
+/**
+ * Resolves a model the way `findAccount` resolves an account: exact text, then
+ * case-insensitively, then by the 1-based position the picker prints.
+ *
+ * Returns the *stored* spelling, so `--model gpt-5.6` selects `GPT-5.6` rather
+ * than adding a second entry that differs only in case.
+ */
+export function findModel(router: Router, nameOrPosition: string): string | undefined {
+  const needle = nameOrPosition.trim();
+  if (needle.length === 0) return undefined;
+  const named =
+    router.models.find((model) => model === needle) ?? router.models.find((model) => sameName(model, needle));
+  if (named !== undefined) return named;
+  return /^\d+$/.test(needle) ? router.models[Number(needle) - 1] : undefined;
+}
+
+/** The list with `model` appended, or unchanged when it is already there. */
+export function withModel(models: readonly string[], model: string): readonly string[] {
+  return models.some((existing) => sameName(existing, model)) ? models : [...models, model];
+}

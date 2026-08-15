@@ -56,6 +56,19 @@ export function accountNameProblem(name: string): string | undefined {
 }
 
 /**
+ * Model ids are passed to the provider verbatim, so they must be a single
+ * printable token — a stray newline would corrupt the settings file or the child
+ * environment rather than fail loudly.
+ */
+export function modelNameProblem(name: string): string | undefined {
+  for (const ch of name) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return 'A model name must not contain control characters.';
+  }
+  return undefined;
+}
+
+/**
  * One credential belonging to a router.
  *
  * An account is deliberately *not* a place to put a base URL: the router owns the
@@ -73,6 +86,15 @@ export const accountSchema = v.object({
   }),
   credentialRef: v.string({ min: 1, label: 'Credential reference' }),
   description: v.string({ max: 200 }).withDefault(''),
+  /**
+   * Model this account last launched with, chosen from its router's list.
+   *
+   * Optional on purpose: model selection is never compulsory, so an account that
+   * has never picked one simply has no field here and Claude Code keeps using its
+   * own default. The *definitions* live on the router — only the last selection is
+   * per-account.
+   */
+  model: v.string({ min: 1, max: 100, label: 'Model', check: modelNameProblem }).optional(),
   createdAt: v.string({ min: 1 }),
   updatedAt: v.string({ min: 1 }),
 });
@@ -100,6 +122,15 @@ export const routerSchema = v.object({
   accounts: v.array(accountSchema).withDefault(() => []),
   /** Account selected for this router. Cleared when that account is deleted. */
   activeAccount: v.string({ min: 1 }).optional(),
+  /**
+   * Models this gateway offers, shared by every one of its accounts.
+   *
+   * The list belongs to the router because it is a property of the endpoint, not
+   * of a credential; which one an account last used is remembered on the account.
+   * Defaulted rather than required, so every config written before models existed
+   * still loads unchanged.
+   */
+  models: v.array(v.string({ min: 1, max: 100, label: 'Model', check: modelNameProblem })).withDefault(() => []),
   description: v.string({ max: 200 }).withDefault(''),
   provider: v.literalUnion(PROVIDER_IDS).withDefault(DEFAULT_PROVIDER),
   authEnvVar: v.literalUnion(AUTH_ENV_VARS).withDefault(DEFAULT_AUTH_ENV_VAR),
@@ -149,6 +180,8 @@ export const activationSchema = v.object({
   /** Account whose key was applied. Absent on records written before accounts. */
   accountId: v.string({ min: 1 }).optional(),
   accountName: v.string({ min: 1 }).optional(),
+  /** Model written into the provider config, when one was selected. */
+  model: v.string({ min: 1, max: 100 }).optional(),
   provider: v.literalUnion(PROVIDER_IDS).withDefault(DEFAULT_PROVIDER),
   appliedAt: v.string({ min: 1 }),
   targetFile: v.string({ min: 1 }),

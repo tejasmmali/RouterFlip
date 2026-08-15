@@ -15,7 +15,6 @@ export const CSI = `${ESC}[`;
 export const RESET = `${CSI}0m`;
 export const BOLD = `${CSI}1m`;
 export const DIM = `${CSI}2m`;
-export const ITALIC = `${CSI}3m`;
 export const UNDERLINE = `${CSI}4m`;
 export const INVERSE = `${CSI}7m`;
 export const NO_BOLD = `${CSI}22m`;
@@ -27,22 +26,15 @@ export const NO_INVERSE = `${CSI}27m`;
 export function fgRgb(r: number, g: number, b: number): string {
   return `${CSI}38;2;${r};${g};${b}m`;
 }
-export function bgRgb(r: number, g: number, b: number): string {
-  return `${CSI}48;2;${r};${g};${b}m`;
-}
 /** 256-colour fallback. */
 export function fg256(index: number): string {
   return `${CSI}38;5;${index}m`;
-}
-export function bg256(index: number): string {
-  return `${CSI}48;5;${index}m`;
 }
 /** Basic 16-colour fallback (30–37 / 90–97). */
 export function fgBasic(code: number): string {
   return `${CSI}${code}m`;
 }
 export const FG_DEFAULT = `${CSI}39m`;
-export const BG_DEFAULT = `${CSI}49m`;
 
 // ── Cursor and screen ──────────────────────────────────────────────────────
 export const CURSOR_HIDE = `${CSI}?25l`;
@@ -62,16 +54,6 @@ export function cursorTo(row: number, column = 1): string {
 }
 export function cursorUp(n = 1): string {
   return n > 0 ? `${CSI}${n}A` : '';
-}
-export function cursorDown(n = 1): string {
-  return n > 0 ? `${CSI}${n}B` : '';
-}
-export function eraseLines(n: number): string {
-  let out = '';
-  for (let i = 0; i < n; i += 1) {
-    out += CLEAR_LINE + (i < n - 1 ? cursorUp(1) : '');
-  }
-  return out + `${CSI}G`;
 }
 
 const ANSI_PATTERN = new RegExp(`${ESC}\\[[0-9;?]*[A-Za-z]`, 'g');

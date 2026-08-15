@@ -64,11 +64,3 @@ export function which(name: string, pathEnv = process.env.PATH ?? ''): string | 
   return undefined;
 }
 
-/** First resolvable name from `names`, with the name that matched. */
-export function whichAny(names: readonly string[]): { readonly name: string; readonly path: string } | undefined {
-  for (const name of names) {
-    const found = which(name);
-    if (found) return { name, path: found };
-  }
-  return undefined;
-}

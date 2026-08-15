@@ -29,6 +29,24 @@ export interface ProviderDetection {
 export type EnvDelta = Readonly<Record<string, string>>;
 
 /**
+ * A runtime configuration override for temporary mode.
+ *
+ * Some provider CLIs apply their own settings file *over* the inherited process
+ * environment (Claude Code >= 2.0.1 does exactly this with the `env` block in
+ * `settings.json`), so `envFor` alone is not enough to make a temporary router
+ * win over a permanent one. This lets the provider hand back a small settings
+ * object plus the CLI arguments that load it: the launcher writes the object to a
+ * private temp file, prepends `args(file)` to the user's own arguments, and
+ * deletes the file when the child exits. Nothing persistent is touched.
+ */
+export interface TemporaryOverride {
+  /** JSON-serialisable settings written to a private, short-lived temp file. */
+  readonly settings: unknown;
+  /** CLI arguments that load that file, given its path. Prepended to user args. */
+  args(settingsFile: string): readonly string[];
+}
+
+/**
  * How permanent mode persists the credential.
  *
  *   'env'    — writes the key into the provider's settings file. Simple and
@@ -53,6 +71,15 @@ export interface ApplyOptions {
    * `use --account` would silently keep serving the old key.
    */
   readonly account?: Account;
+  /**
+   * Model to pin, when the account has chosen one.
+   *
+   * Optional because model selection is optional: omitted, the provider manages
+   * no model key at all and its own default keeps applying. Passing it on one
+   * apply and omitting it on the next *retires* the key, the same way a strategy
+   * change retires the one it replaces.
+   */
+  readonly model?: string;
 }
 
 /** What the provider's persistent configuration currently says. */
@@ -106,8 +133,12 @@ export interface Provider {
   /**
    * Environment for a child process. Used by temporary mode; must not read or
    * write any configuration file.
+   *
+   * `model` is the account's chosen model, when it has one. It is optional so
+   * that a router with no model selected produces exactly the environment it did
+   * before models existed — nothing extra is ever set on a guess.
    */
-  envFor(router: Router, apiKey: string): EnvDelta;
+  envFor(router: Router, apiKey: string, model?: string): EnvDelta;
 
   /**
    * Variables that must be removed from the child environment because they
@@ -116,8 +147,16 @@ export interface Provider {
    */
   conflicts(router: Router): readonly string[];
 
+  /**
+   * Runtime override for temporary mode, when the provider's own settings file
+   * would otherwise outrank the child environment. Optional: a provider whose
+   * child honours the process environment returns undefined, and temporary mode
+   * relies on `envFor` alone.
+   */
+  temporaryOverride?(router: Router, apiKey: string, model?: string): TemporaryOverride | undefined;
+
   /** Env var names this provider sets for a given router. */
-  envKeys(router: Router): readonly string[];
+  envKeys(router: Router, model?: string): readonly string[];
 
   configFile(): string;
   inspect(): ProviderConfigSnapshot;

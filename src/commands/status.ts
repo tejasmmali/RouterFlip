@@ -13,14 +13,20 @@ import { relativeTime } from '../ui/views.ts';
 import { routerJson, type CommandResult } from './shared.ts';
 
 /** Auth variables are reported as present/absent only — never their values. */
-const WATCHED_ENV = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CONFIG_DIR'] as const;
+const WATCHED_ENV = [
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_MODEL',
+  'CLAUDE_CONFIG_DIR',
+] as const;
 
 function envSummary(): { name: string; present: boolean; value?: string }[] {
   return WATCHED_ENV.map((name) => {
     const raw = process.env[name];
     const present = typeof raw === 'string' && raw.length > 0;
-    // A base URL or config dir is not a secret; a key is only ever "set".
-    const shareable = name === 'ANTHROPIC_BASE_URL' || name === 'CLAUDE_CONFIG_DIR';
+    // A base URL, model or config dir is not a secret; a key is only ever "set".
+    const shareable = name !== 'ANTHROPIC_API_KEY' && name !== 'ANTHROPIC_AUTH_TOKEN';
     return { name, present, ...(present && shareable ? { value: raw } : {}) };
   });
 }
@@ -42,7 +48,7 @@ export async function statusCommand(ctx: AppContext): Promise<CommandResult> {
       ok: true,
       routers: ctx.service.list().length,
       router: view ? routerJson(view) : null,
-      account: account ? { id: account.id, name: account.name } : null,
+      account: account ? { id: account.id, name: account.name, ...(account.model ? { model: account.model } : {}) } : null,
       permanent: activation
         ? {
             router: activation.routerName,
@@ -79,6 +85,14 @@ export async function statusCommand(ctx: AppContext): Promise<CommandResult> {
       account
         ? `${t.text(account.name)}${total > 1 ? t.dim(` (of ${total})`) : ''}`
         : t.warning('none — this router has no accounts'),
+    );
+    // The list is the router's, the selection the account's, so both are worth a
+    // word: "none" here means Claude Code's own default still decides.
+    field(
+      'Model',
+      account?.model
+        ? t.text(account.model)
+        : t.dim(router.models.length > 0 ? 'none selected — provider default' : 'provider default'),
     );
   }
   field(

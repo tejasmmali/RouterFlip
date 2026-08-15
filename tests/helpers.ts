@@ -70,6 +70,9 @@ export function makeRouter(overrides: Partial<Router> = {}): Router {
     credentialRef: 'routerflip-alpha-1',
     accounts: [makeAccount()],
     activeAccount: 'account-1',
+    // No models by default: the interesting case for most tests is a router that
+    // has never chosen one, which is what every pre-model config looks like.
+    models: [],
     description: '',
     provider: 'claude-code',
     authEnvVar: 'ANTHROPIC_API_KEY',

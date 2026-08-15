@@ -24,6 +24,7 @@ const COMMANDS: readonly Entry[] = [
   { usage: 'add', summary: 'Add a router profile.' },
   { usage: 'list', summary: 'List every configured router.' },
   { usage: 'accounts <router> [add|edit|delete|use]', summary: "Manage a router's accounts." },
+  { usage: 'models <router> [add|remove|use|clear]', summary: "Manage a router's models and pick one." },
   { usage: 'use [name]', summary: 'Use a router temporarily or permanently.' },
   { usage: 'claude [args…]', summary: 'Run Claude Code through the current router.' },
   { usage: 'current', summary: 'Show the selected router.' },
@@ -44,6 +45,7 @@ const OPTIONS: readonly Entry[] = [
   { usage: '--strategy <env|helper>', summary: 'How permanent mode stores the key.' },
   { usage: '-r, --router <name>', summary: 'Select a router without a prompt.' },
   { usage: '-a, --account <name>', summary: 'Select one of the router’s accounts by name, id or position.' },
+  { usage: '-m, --model <name>', summary: 'Model to launch with, by name or position. Optional everywhere.' },
   { usage: '-n, --name <name>', summary: 'Router name (with `add`, or to rename with `edit`).' },
   { usage: '-u, --url <url>', summary: 'Gateway base URL.' },
   { usage: '--key <value>', summary: 'API key. Prefer --key-stdin.' },
@@ -65,6 +67,7 @@ const EXAMPLES: readonly (readonly [string, string])[] = [
   ['printf %s "$KEY" | routerflip add --name AgentRouter --url https://api.agentrouter.example --key-stdin', 'add a gateway without putting the key in your shell history'],
   ['routerflip use AgentRouter --temporary', 'run Claude Code against it once, changing nothing'],
   ['routerflip use AgentRouter --account "Account 2" --temporary', 'launch with a specific account of that gateway'],
+  ['routerflip models AgentRouter add "Opus 4.8"', 'offer a model, then press M on the action screen to switch to it'],
   ['routerflip use AgentRouter --permanent', 'make it the default, with a backup first'],
   ['routerflip test --all', 'check every gateway'],
 ];

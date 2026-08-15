@@ -80,7 +80,11 @@ test('the spawned child gets the gateway, the key, and the forwarded arguments',
   const call = spawner.calls[0];
   assert.ok(call);
   assert.equal(call.command, '/usr/local/bin/claude');
-  assert.deepEqual(call.args, ['--resume', 'session-1']);
+  // A `--settings <file>` override is prepended (see the settings-precedence test
+  // below); the user's own arguments follow it, in order and unchanged.
+  assert.equal(call.args[0], '--settings');
+  assert.match(String(call.args[1]), /settings\.json$/);
+  assert.deepEqual(call.args.slice(-2), ['--resume', 'session-1']);
   assert.equal(call.options.stdio, 'inherit', 'the child must own the terminal');
   assert.equal(call.options.shell, false, 'no command string is ever built');
   const env = call.options.env as NodeJS.ProcessEnv;

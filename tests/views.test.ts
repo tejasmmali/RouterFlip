@@ -52,6 +52,7 @@ function makeView(overrides: Partial<RouterView> = {}): RouterView {
     accountCount: 1,
     activeAccountId: 'account-1',
     activeAccountName: 'Account 1',
+    models: [],
     authEnvVar: 'ANTHROPIC_API_KEY',
     provider: 'claude-code',
     isActive: false,
@@ -242,14 +243,14 @@ test('the account screen repeats the router it belongs to', () => {
 
 test('the account key hints offer Back rather than Quit', () => {
   const bar = theme().strip(accountKeybar());
-  const expected = ['Navigate', 'Select', 'Add Account', 'Edit', 'Delete', 'Back'];
+  const expected = ['Navigate', 'Select', 'Add Account', 'Edit', 'Delete', 'Model', 'Back'];
   let cursor = -1;
   for (const label of expected) {
     const at = bar.indexOf(label);
     assert.ok(at > cursor, `${label} is missing or out of order`);
     cursor = at;
   }
-  for (const key of ['Enter', 'A', 'E', 'D', 'B']) assert.match(bar, new RegExp(key));
+  for (const key of ['Enter', 'A', 'E', 'D', 'M', 'B']) assert.match(bar, new RegExp(key));
   assert.equal(/Quit/.test(bar), false, 'leaving RouterFlip from here would lose the user’s place');
 });
 
