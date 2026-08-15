@@ -14,6 +14,14 @@
   ],
   "license": "MIT",
   "author": "Tejas Mali",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tejasmmali/RouterFlip.git"
+  },
+  "homepage": "https://github.com/tejasmmali/RouterFlip#readme",
+  "bugs": {
+    "url": "https://github.com/tejasmmali/RouterFlip/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=20.11.0"
@@ -41,7 +49,7 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "check": "npm run typecheck && npm run test",
     "start": "node --experimental-strip-types src/cli.ts",
-    "prepublishOnly": "npm run clean && npm run build"
+    "prepublishOnly": "npm run check && npm run clean && npm run build"
   },
   "dependencies": {},
   "devDependencies": {

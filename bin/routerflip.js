@@ -4,7 +4,7 @@
 // Kept deliberately tiny: it resolves the compiled entry point next to this
 // file so that `npm i -g routerflip` works without a shebang-rewrite step,
 // and reports a friendly message if the package was installed without a build.
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 
@@ -20,5 +20,7 @@ if (!existsSync(compiled)) {
   process.exit(1);
 }
 
-const { main } = await import(compiled);
+// A file:// URL, not the bare path: on Windows `import('C:\\...')` is read as
+// the protocol `c:` and throws ERR_UNSUPPORTED_ESM_URL_SCHEME.
+const { main } = await import(pathToFileURL(compiled).href);
 await main(process.argv.slice(2));

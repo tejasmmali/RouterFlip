@@ -4,6 +4,7 @@ node_modules/
 # Build output
 dist/
 *.tsbuildinfo
+*.tgz
 
 # Local RouterFlip data (never commit — may reference credentials)
 .routerflip/

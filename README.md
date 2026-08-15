@@ -51,14 +51,20 @@ undo whatever it changed.
 npm install -g routerflip
 ```
 
+Then just run it:
+
+```bash
+routerflip
+```
+
 That gives you two commands, `routerflip` and the shorter `rflip`. Node.js 20.11
 or newer is required; nothing else is.
 
 From a clone:
 
 ```bash
-git clone https://github.com/tejasmmali/routerflip.git
-cd routerflip
+git clone https://github.com/tejasmmali/RouterFlip.git
+cd RouterFlip
 npm install          # devDependencies only — TypeScript and @types/node
 npm run check        # typecheck + tests
 npm link             # puts routerflip on your PATH
