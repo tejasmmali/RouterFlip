@@ -1,6 +1,6 @@
 {
   "name": "routerflip",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "RouterFlip — switch your Claude Code gateway in seconds.",
   "keywords": [
     "claude",
@@ -50,9 +50,6 @@
     "check": "npm run typecheck && npm run test",
     "start": "node --experimental-strip-types src/cli.ts",
     "prepublishOnly": "npm run check && npm run clean && npm run build"
-  },
-  "dependencies": {
-    "routerflip": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
