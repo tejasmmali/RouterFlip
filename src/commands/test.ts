@@ -10,6 +10,7 @@
 import type { AppContext } from '../context.ts';
 import type { Account, Router } from '../core/schema.ts';
 import { json, blank, failure, line, note, success, warning } from '../ui/output.ts';
+import { iconOk, iconWarn } from '../ui/icons.ts';
 import { StepList, type StepState } from '../ui/spinner.ts';
 import { theme } from '../ui/theme.ts';
 import { endpointFor, testRouter, type FailureReason, type FetchLike, type StepStatus, type TestReport } from '../services/tester.ts';
@@ -81,6 +82,11 @@ export async function runTest(ctx: AppContext, router: Router, options: RunTestO
   });
   live?.finish();
 
+  // The listing was already fetched to grade the credential, so storing it here is
+  // what fills the Models screen without a second request — and it is deliberately
+  // not allowed to change the verdict: a gateway with no listing is still healthy.
+  if (report.models) ctx.service.syncModels(router.id, report.models);
+
   if (ctx.json) return report;
   if (!options.silent) printSummary(report);
   return report;
@@ -101,6 +107,11 @@ function printSummary(report: TestReport): void {
   const t = theme();
   blank();
   const latency = report.latencyMs === undefined ? '' : ` ${t.dim(`(${report.latencyMs}ms)`)}`;
+  // Discovery is reported separately from the verdict, because it is a separate
+  // question: "models unavailable" is a fact about the gateway's listing, not a
+  // failure of the router. On a failed run the reason is already the headline, so
+  // adding a second line about models would only bury it.
+  if (report.ok) line(`  ${discoveryLine(report)}`);
   if (report.ok) {
     const warned = report.steps.some((step) => step.status === 'warn');
     if (warned) warning(`${report.routerName}: healthy, with warnings.${latency}`);
@@ -113,6 +124,14 @@ function printSummary(report: TestReport): void {
   blank();
 }
 
+/** `✓ Models discovered: 18`, or the warning that the gateway does not list any. */
+function discoveryLine(report: TestReport): string {
+  const t = theme();
+  const found = report.models?.length ?? 0;
+  if (found === 0) return `${iconWarn()} ${t.muted('Model discovery unavailable')}`;
+  return `${iconOk()} ${t.muted(`Models discovered: ${found}`)}`;
+}
+
 function reportJson(report: TestReport): Record<string, unknown> {
   return {
     router: report.routerName,
@@ -122,6 +141,11 @@ function reportJson(report: TestReport): Record<string, unknown> {
     verdict: report.ok ? 'Healthy' : report.reason ? VERDICTS[report.reason] : 'Failed',
     ...(report.reason === undefined ? {} : { reason: report.reason }),
     ...(report.model === undefined ? {} : { model: report.model }),
+    // Ids and labels only — the listing's body is never echoed, so a gateway that
+    // repeats the key back in an error cannot reach this output.
+    ...(report.models === undefined
+      ? { modelsDiscovered: null }
+      : { modelsDiscovered: report.models.length, models: report.models.map((entry) => entry.id) }),
     ...(report.status === undefined ? {} : { status: report.status }),
     ...(report.latencyMs === undefined ? {} : { latencyMs: report.latencyMs }),
     steps: report.steps.map((step) => ({

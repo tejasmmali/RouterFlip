@@ -9,7 +9,7 @@
  * the key.** Nothing here reads or returns a secret — only the *reference* to one.
  */
 import { accountCredentialRefFor, credentialRefFor, sameName, uniqueId } from './id.ts';
-import type { Account, Router } from './schema.ts';
+import { modelNameProblem, type Account, type Router } from './schema.ts';
 
 /**
  * Name given to a router's first account — both when a router is created and when
@@ -114,3 +114,58 @@ export function findModel(router: Router, nameOrPosition: string): string | unde
 export function withModel(models: readonly string[], model: string): readonly string[] {
   return models.some((existing) => sameName(existing, model)) ? models : [...models, model];
 }
+
+/**
+ * One model as a gateway describes it: the id it accepts, and a label when it
+ * offers one worth showing. `id` is the only half ever sent to Claude Code.
+ */
+export interface DiscoveredModel {
+  readonly id: string;
+  readonly name?: string;
+}
+
+/** How a model is shown to a human: its label when it has one, else the id. */
+export function modelLabel(router: Router, model: string): string {
+  return router.modelNames[model] ?? model;
+}
+
+/**
+ * A gateway lists what it serves and RouterFlip believes it — but never at the
+ * cost of what the user typed. Nothing gets deleted here: a model that vanished
+ * from the listing may still be real, and an account may still have it selected,
+ * so the discovered ids come first (in the order the gateway gave them) and
+ * anything only the user knows about is kept after them.
+ *
+ * Deduplication is by model id, case-insensitively, keeping the spelling already
+ * on disk so an account's remembered selection still matches after a refresh.
+ * ponytail: capped at MAX_MODELS; a gateway that lists more is almost certainly
+ * broken, and config.json is not a cache.
+ */
+export function mergeModels(
+  router: Router,
+  discovered: readonly DiscoveredModel[],
+): { readonly models: string[]; readonly modelNames: Record<string, string> } {
+  const models: string[] = [];
+  const modelNames: Record<string, string> = {};
+  const add = (id: string, name?: string): void => {
+    if (models.length >= MAX_MODELS || models.some((existing) => sameName(existing, id))) return;
+    // The listing is untrusted input on its way to config.json and to a child
+    // process's environment, so it is held to the same rule as a typed name.
+    if (id.length === 0 || id.length > 100 || modelNameProblem(id) !== undefined) return;
+    models.push(id);
+    if (name !== undefined && name.length > 0 && name !== id && modelNameProblem(name) === undefined) {
+      modelNames[id] = name.slice(0, 100);
+    }
+  };
+
+  for (const entry of discovered) {
+    const id = entry.id.trim();
+    const known = router.models.find((existing) => sameName(existing, id));
+    add(known ?? id, entry.name?.trim());
+  }
+  for (const model of router.models) add(model, router.modelNames[model]);
+  return { models, modelNames };
+}
+
+/** A gateway with more models than this is not worth persisting in full. */
+const MAX_MODELS = 500;

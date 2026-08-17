@@ -14,17 +14,20 @@
  * to", not a gap to be filled.
  */
 import type { AppContext } from '../context.ts';
+import { modelLabel } from '../core/accounts.ts';
 import type { Account, Router } from '../core/schema.ts';
 import { RouterFlipError } from '../errors.ts';
+import { fetchModels, type FetchLike } from '../services/tester.ts';
 import { isInteractive } from '../ui/input.ts';
-import { blank, heading, json, line, note, success } from '../ui/output.ts';
+import { blank, heading, json, line, note, success, warning } from '../ui/output.ts';
 import { box } from '../ui/box.ts';
 import { select, text, type SelectOption } from '../ui/prompts.ts';
 import { theme } from '../ui/theme.ts';
+import { modelKeybar } from '../ui/views.ts';
 import { terminalWidth } from '../ui/width.ts';
 import { confirmAction, pickRouter, selectAccount, type CommandResult } from './shared.ts';
 
-const VERBS = ['list', 'add', 'remove', 'delete', 'rm', 'use', 'select', 'clear', 'none'] as const;
+const VERBS = ['list', 'add', 'remove', 'delete', 'rm', 'use', 'select', 'clear', 'none', 'refresh', 'discover'] as const;
 type Verb = (typeof VERBS)[number];
 
 function isVerb(token: string | undefined): token is Verb {
@@ -76,13 +79,77 @@ function modelsJson(ctx: AppContext, router: Router): Record<string, unknown> {
   return {
     ok: true,
     router: router.name,
-    models: [...router.models],
+    models: router.models.map((model) => ({
+      id: model,
+      ...(router.modelNames[model] ? { name: router.modelNames[model] } : {}),
+    })),
     ...(account ? { account: account.name, selected: account.model ?? null } : {}),
     selections: router.accounts.map((entry) => ({
       account: entry.name,
       model: entry.model ?? null,
     })),
   };
+}
+
+export interface RefreshOptions {
+  /** Whose key to ask with. Defaults to the router's selected account. */
+  readonly account?: Account;
+  /** Injected transport, so tests never touch the network. */
+  readonly fetchImpl?: FetchLike;
+}
+
+export interface RefreshResult {
+  /** True when the gateway listed at least one model and the list was stored. */
+  readonly ok: boolean;
+  readonly count: number;
+  /** How many the gateway listed, before merging with anything added by hand. */
+  readonly discovered: number;
+  /** Why discovery came up empty. Never contains the response body or the key. */
+  readonly reason?: string;
+}
+
+/**
+ * Asks the gateway what it serves and stores the answer.
+ *
+ * The request is `fetchModels` — the same one the health check grades the
+ * credential with — so there is exactly one model-discovery implementation. A
+ * gateway that does not list models is not an error here: the user simply keeps
+ * whatever is already configured, and `reason` says why nothing arrived.
+ */
+export async function refreshModels(ctx: AppContext, router: Router, options: RefreshOptions = {}): Promise<RefreshResult> {
+  const account = options.account ?? ctx.service.activeAccountOf(router);
+  const apiKey = await ctx.service.apiKey(router, account);
+  const listing = await fetchModels(router, {
+    apiKey,
+    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+  });
+  const failed = (reason: string): RefreshResult => ({ ok: false, count: router.models.length, discovered: 0, reason });
+
+  if (listing instanceof Error) return failed('The gateway could not be reached.');
+  if (listing.status === 401 || listing.status === 403) return failed('The gateway rejected the credential.');
+  if (listing.status !== 200) return failed(`The gateway does not list its models (HTTP ${listing.status}).`);
+  if (listing.models.length === 0) return failed('The gateway listed no models.');
+
+  const { models } = ctx.service.syncModels(router.id, listing.models);
+  return { ok: true, count: models.length, discovered: listing.models.length };
+}
+
+/** `models <router> refresh` — discovery on demand, from the command line. */
+async function refreshCommand(ctx: AppContext, router: Router, options: RefreshOptions = {}): Promise<CommandResult> {
+  const result = await refreshModels(ctx, router, options);
+  const updated = ctx.service.resolve(router.id);
+
+  if (ctx.json) {
+    json({ ...modelsJson(ctx, updated), discovered: result.discovered, ...(result.reason ? { warning: result.reason } : {}) });
+    return 0;
+  }
+  blank();
+  if (result.ok) success(`${updated.name} offers ${result.count} model${result.count === 1 ? '' : 's'}.`);
+  else {
+    warning(`Model discovery unavailable for ${updated.name}.`);
+    note(`  ${theme().dim(result.reason ?? '')}`);
+  }
+  return 0;
 }
 
 /** `models <router>` — the router's list, and what each account chose from it. */
@@ -100,7 +167,7 @@ function listModels(ctx: AppContext, router: Router): CommandResult {
   if (router.models.length === 0) {
     note(`  ${t.muted('No models are configured, so launches use the provider default.')}`);
     blank();
-    note(`  ${t.dim(`Add one with \`routerflip models ${router.name} add "<name>"\`.`)}`);
+    note(`  ${t.dim(`Ask the gateway what it serves with \`routerflip models ${router.name} refresh\`.`)}`);
     return 0;
   }
 
@@ -110,7 +177,11 @@ function listModels(ctx: AppContext, router: Router): CommandResult {
   const selected = new Set(router.accounts.flatMap((entry) => (entry.model === undefined ? [] : [entry.model])));
   router.models.forEach((model, index) => {
     const marker = selected.has(model) ? t.success('·') : t.dim('·');
-    line(`  ${marker} ${t.text(model)}  ${t.dim(`(${index + 1})`)}`);
+    const label = modelLabel(router, model);
+    // The id is what Claude Code is launched with, so it stays visible even when
+    // the gateway gave the model a friendlier name.
+    const id = label === model ? '' : `  ${t.dim(model)}`;
+    line(`  ${marker} ${t.text(label)}${id}  ${t.dim(`(${index + 1})`)}`);
   });
   blank();
 
@@ -211,12 +282,17 @@ async function useModel(ctx: AppContext, router: Router, name: string | undefine
   } else {
     chosen = await select<string>({
       message: `Which model should "${account.name}" use?`,
-      options: router.models.map((model) => ({
-        label: model,
-        value: model,
-        ...(model === account.model ? { hint: '(current)' } : {}),
-      })),
+      options: router.models.map((model) => {
+        const label = modelLabel(router, model);
+        return {
+          label,
+          value: model,
+          ...(label === model ? {} : { detail: model }),
+          ...(model === account.model ? { hint: '(current)' } : {}),
+        };
+      }),
       initial: Math.max(0, router.models.indexOf(account.model ?? '')),
+      ...(router.models.length >= SEARCHABLE_FROM ? { search: true } : {}),
     });
   }
 
@@ -262,7 +338,7 @@ function parse(ctx: AppContext): { router?: string; verb?: Verb; model?: string 
     tokens.shift();
   } else if (tokens[0] !== undefined) {
     throw new RouterFlipError('BAD_USAGE', `Unknown model action "${tokens[0]}".`, {
-      hint: 'Try one of: list, add, remove, use, clear.',
+      hint: 'Try one of: list, refresh, add, remove, use, clear.',
       exitCode: 2,
     });
   }
@@ -292,6 +368,9 @@ export async function modelsCommand(ctx: AppContext): Promise<CommandResult> {
     case 'clear':
     case 'none':
       return clearModel(ctx, router);
+    case 'refresh':
+    case 'discover':
+      return refreshCommand(ctx, router);
     default:
       // `models <router> "<name>"` with no verb is a selection: the shortest thing
       // to type is the thing people do most often.
@@ -312,6 +391,7 @@ type PickerChoice =
   | { readonly kind: 'model'; readonly model: string }
   | { readonly kind: 'none' }
   | { readonly kind: 'add' }
+  | { readonly kind: 'refresh' }
   | { readonly kind: 'back' };
 
 export interface ChooseModelResult {
@@ -323,13 +403,38 @@ export interface ChooseModelResult {
   readonly status?: string;
 }
 
+/**
+ * Above this many models the picker becomes a filter box. Longer lists still
+ * draw: inside the dashboard's frame `select` windows them, and typed straight
+ * into a shell they scroll like any other prompt.
+ */
+const SEARCHABLE_FROM = 8;
+
 function pickerOptions(router: Router, account: Account): SelectOption<PickerChoice>[] {
-  const out: SelectOption<PickerChoice>[] = router.models.map((model) => ({
-    label: model,
-    value: { kind: 'model', model },
-    ...(model === account.model ? { hint: '(current)' } : {}),
-  }));
-  out.push({ label: 'Add a model…', value: { kind: 'add' }, detail: "Offer another model on this router's list." });
+  const out: SelectOption<PickerChoice>[] = router.models.map((model) => {
+    const label = modelLabel(router, model);
+    return {
+      label,
+      value: { kind: 'model', model },
+      // The id is never hidden behind a label: this is the string Claude Code gets.
+      ...(label === model ? {} : { detail: model }),
+      ...(model === account.model ? { hint: '(current)' } : {}),
+    };
+  });
+  out.push({
+    label: 'Refresh models',
+    value: { kind: 'refresh' },
+    detail: 'Ask the gateway what it serves now.',
+    shortcut: 'r',
+  });
+  // Discovery is the default way the list fills; typing a name by hand is for the
+  // gateways that do not answer a model listing at all.
+  out.push({
+    label: 'Add custom model…',
+    value: { kind: 'add' },
+    detail: 'For a gateway that does not publish its models.',
+    shortcut: 'a',
+  });
   // Only worth offering when there is something to clear; a router that has never
   // pinned a model is already on the provider default.
   if (account.model !== undefined) {
@@ -344,68 +449,96 @@ function pickerOptions(router: Router, account: Account): SelectOption<PickerCho
  *
  * Returns to whatever screen opened it — the caller redraws — and never forces a
  * choice: `Back`, `Esc` and the `B` shortcut all leave the remembered selection
- * exactly as it was. Every branch settles in one turn, so changing a model is a
- * keypress and an Enter rather than a walk through screens.
+ * exactly as it was. Every branch settles in one turn except `R`, which refreshes
+ * the list and comes straight back so the new models can be picked from.
  */
-export async function chooseModel(ctx: AppContext, router: Router, account: Account): Promise<ChooseModelResult> {
+export async function chooseModel(
+  ctx: AppContext,
+  router: Router,
+  account: Account,
+  options: { readonly fetchImpl?: FetchLike } = {},
+): Promise<ChooseModelResult> {
   const t = theme();
-  const current = ctx.service.resolve(router.id);
-  const chosen = ctx.service.resolveAccount(current, account.id);
+  let notice: string | undefined;
 
-  blank();
-  for (const row of box([], { width: terminalWidth(), title: 'SELECT MODEL' })) line(row);
-  blank();
+  // Printed once, above the prompt: the prompt redraws itself in place beneath it.
+  // Its height is what tells the prompt where the bottom of the frame is.
+  const header = ['', ...box([], { width: terminalWidth(), title: 'SELECT MODEL' }), ''];
+  for (const row of header) line(row);
 
-  const choice = await select<PickerChoice>({
-    message: current.models.length === 0 ? 'No models yet — add the first one?' : 'Which model?',
-    options: pickerOptions(current, chosen),
-    initial: Math.max(0, current.models.indexOf(chosen.model ?? '')),
-    details: [
-      `  ${t.muted('Router')}   ${t.text(current.name)}`,
-      `  ${t.muted('Account')}  ${t.text(chosen.name)}`,
-      `  ${t.muted('Current')}  ${chosen.model ? t.text(chosen.model) : t.dim('no model selected')}`,
-    ],
-    help: 'Enter select   B back   Esc cancel',
-  });
+  for (;;) {
+    const current = ctx.service.resolve(router.id);
+    const chosen = ctx.service.resolveAccount(current, account.id);
+    const searchable = current.models.length >= SEARCHABLE_FROM;
 
-  if (choice.kind === 'back') return { changed: false, ...(chosen.model ? { model: chosen.model } : {}) };
-
-  if (choice.kind === 'add') {
-    const name = await text({
-      message: 'Model name',
-      placeholder: 'for example: Opus 4.8',
-      validate: (value) => {
-        try {
-          ctx.service.assertModelValid(value);
-          return undefined;
-        } catch (error) {
-          return error instanceof Error ? error.message : 'Invalid model name.';
-        }
-      },
-      help: "Added to this router's list, so every account of it can choose the model.",
+    const choice = await select<PickerChoice>({
+      message: current.models.length === 0 ? 'No models yet — refresh, or add one by hand?' : 'Which model?',
+      options: pickerOptions(current, chosen),
+      initial: Math.max(0, current.models.indexOf(chosen.model ?? '')),
+      details: [
+        `  ${t.muted('Router')}   ${t.text(current.name)}`,
+        `  ${t.muted('Account')}  ${t.text(chosen.name)}`,
+        `  ${t.muted('Current')}  ${chosen.model ? t.text(modelLabel(current, chosen.model)) : t.dim('no model selected')}`,
+        ...(notice ? [`  ${t.muted('Models')}   ${t.dim(notice)}`] : []),
+      ],
+      // The same bottom command bar as the dashboard and the account screen; with
+      // the filter on, printable keys type into it, so the actions are rows only.
+      help: modelKeybar(searchable),
+      rowsAbove: header.length,
+      ...(searchable ? { search: true } : {}),
     });
-    // Registering it and selecting it is one step: someone who just typed a model
-    // name meant to use it, and the list is the router's either way.
-    const applied = ctx.service.setAccountModel(current.id, chosen.id, name);
-    const model = applied.model ?? name;
+
+    if (choice.kind === 'back') return { changed: false, ...(chosen.model ? { model: chosen.model } : {}) };
+
+    if (choice.kind === 'refresh') {
+      const result = await refreshModels(ctx, current, {
+        account: chosen,
+        ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+      });
+      notice = result.ok
+        ? `${result.count} available (${result.discovered} from the gateway)`
+        : `discovery unavailable — ${result.reason ?? ''}`;
+      continue;
+    }
+
+    if (choice.kind === 'add') {
+      const name = await text({
+        message: 'Model name',
+        placeholder: 'for example: Opus 4.8',
+        validate: (value) => {
+          try {
+            ctx.service.assertModelValid(value);
+            return undefined;
+          } catch (error) {
+            return error instanceof Error ? error.message : 'Invalid model name.';
+          }
+        },
+        help: "Added to this router's list, so every account of it can choose the model.",
+      });
+      // Registering it and selecting it is one step: someone who just typed a model
+      // name meant to use it, and the list is the router's either way.
+      const applied = ctx.service.setAccountModel(current.id, chosen.id, name);
+      const model = applied.model ?? name;
+      blank();
+      success(`Model changed to ${model}.`);
+      return { changed: true, model, status: `Model: ${model}` };
+    }
+
+    if (choice.kind === 'none') {
+      const applied = ctx.service.setAccountModel(current.id, chosen.id, undefined);
+      blank();
+      success('Model cleared — launches use the provider default.');
+      return { changed: true, status: `${applied.account.name} uses the provider default.` };
+    }
+
+    // Re-picking what is already remembered is not a change, so the caller is not
+    // asked to announce something that did not happen.
+    if (choice.model === chosen.model) return { changed: false, model: choice.model };
+
+    ctx.service.setAccountModel(current.id, chosen.id, choice.model);
+    const label = modelLabel(current, choice.model);
     blank();
-    success(`Model changed to ${model}.`);
-    return { changed: true, model, status: `Model: ${model}` };
+    success(`Model changed to ${label}.`);
+    return { changed: true, model: choice.model, status: `Model: ${label}` };
   }
-
-  if (choice.kind === 'none') {
-    const applied = ctx.service.setAccountModel(current.id, chosen.id, undefined);
-    blank();
-    success('Model cleared — launches use the provider default.');
-    return { changed: true, status: `${applied.account.name} uses the provider default.` };
-  }
-
-  // Re-picking what is already remembered is not a change, so the caller is not
-  // asked to announce something that did not happen.
-  if (choice.model === chosen.model) return { changed: false, model: choice.model };
-
-  ctx.service.setAccountModel(current.id, chosen.id, choice.model);
-  blank();
-  success(`Model changed to ${choice.model}.`);
-  return { changed: true, model: choice.model, status: `Model: ${choice.model}` };
 }

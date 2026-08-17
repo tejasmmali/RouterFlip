@@ -131,6 +131,15 @@ export const routerSchema = v.object({
    * still loads unchanged.
    */
   models: v.array(v.string({ min: 1, max: 100, label: 'Model', check: modelNameProblem })).withDefault(() => []),
+  /**
+   * Human-readable label per model id, for the gateways that offer one.
+   *
+   * A sidecar rather than a `{id, name}` list on purpose: `models` stays literally
+   * the ids Claude Code is launched with, so a display name can never be mistaken
+   * for one. Usually empty — most relays echo the id back as their `display_name` —
+   * and defaulted, so every config written before discovery existed still loads.
+   */
+  modelNames: v.record(v.string({ min: 1, max: 100 })).withDefault(() => ({})),
   description: v.string({ max: 200 }).withDefault(''),
   provider: v.literalUnion(PROVIDER_IDS).withDefault(DEFAULT_PROVIDER),
   authEnvVar: v.literalUnion(AUTH_ENV_VARS).withDefault(DEFAULT_AUTH_ENV_VAR),

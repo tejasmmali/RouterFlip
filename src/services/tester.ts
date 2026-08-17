@@ -23,6 +23,7 @@
  */
 import { logger } from '../logger.ts';
 import { checkUrl, joinUrl } from '../core/url.ts';
+import type { DiscoveredModel } from '../core/accounts.ts';
 import type { Router } from '../core/schema.ts';
 
 export type StepStatus = 'pass' | 'warn' | 'fail' | 'skip';
@@ -51,6 +52,13 @@ export interface TestReport {
   readonly reason?: FailureReason;
   /** Model the probe actually used, once one was chosen. */
   readonly model?: string;
+  /**
+   * What the gateway said it serves, when it answered the listing at all.
+   *
+   * Absent means discovery was unavailable — a distinct thing from "listed
+   * nothing", and never a reason to call the router unhealthy.
+   */
+  readonly models?: readonly DiscoveredModel[];
 }
 
 /** Subset of `fetch` the tester uses, so a test can pass a stub. */
@@ -123,17 +131,66 @@ function firstLine(text: string, limit = 160): string {
   return clean.length > limit ? `${clean.slice(0, limit - 1)}…` : clean;
 }
 
-/** Model ids from an Anthropic-shaped `{"data":[{"id":…}]}` listing. */
-function listedModels(body: string): string[] {
+/**
+ * Models a gateway lists, in the order it listed them.
+ *
+ * Both shapes seen in the wild are the same on the part that matters: Anthropic's
+ * `{"data":[{"id":…,"display_name":…}]}` and the OpenAI-ish listing relays serve
+ * (`{"data":[{"id":…,"owned_by":…}]}`) both key the model on `data[].id`, which is
+ * the string Claude Code has to be given. A label is only kept when the gateway
+ * offers one that actually differs from the id — gorouter and tabitoken echo the
+ * id back as `display_name`, and storing that would be noise.
+ */
+export function parseModelList(body: string): DiscoveredModel[] {
   try {
     const parsed = JSON.parse(body) as { data?: unknown };
     if (!Array.isArray(parsed.data)) return [];
-    return parsed.data
-      .map((entry) => (entry as { id?: unknown }).id)
-      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    const out: DiscoveredModel[] = [];
+    for (const entry of parsed.data) {
+      const row = entry as { id?: unknown; display_name?: unknown; name?: unknown };
+      if (typeof row.id !== 'string') continue;
+      const id = row.id.trim();
+      if (id.length === 0) continue;
+      const label = typeof row.display_name === 'string' ? row.display_name : typeof row.name === 'string' ? row.name : '';
+      const name = label.trim();
+      out.push(name.length > 0 && name !== id ? { id, name } : { id });
+    }
+    return out;
   } catch {
     return [];
   }
+}
+
+export interface ModelListing {
+  readonly status: number;
+  readonly body: string;
+  readonly ms: number;
+  /** Parsed on an HTTP 200 only; a gateway that refuses the listing offers none. */
+  readonly models: readonly DiscoveredModel[];
+}
+
+/**
+ * `GET /v1/models` — the one place RouterFlip asks a gateway what it serves.
+ *
+ * `testRouter` uses it to grade the credential and to borrow a real model, and the
+ * Models screen uses it to refresh the list. Returns the failure instead of
+ * throwing, because a gateway with no listing is a normal outcome here.
+ */
+export async function fetchModels(
+  router: Router,
+  options: { readonly apiKey: string; readonly timeoutMs?: number; readonly fetchImpl?: FetchLike },
+): Promise<ModelListing | Error> {
+  const url = checkUrl(router.baseUrl);
+  if (!url.ok) return new Error(url.error);
+  logger.protect(options.apiKey);
+  const outcome = await request(
+    options.fetchImpl ?? ((target, init) => fetch(target, init)),
+    joinUrl(url.value.url, MODELS_PATH),
+    { method: 'GET', headers: { ...PROBE_HEADERS, ...authHeaders(router, options.apiKey) } },
+    options.timeoutMs ?? 15_000,
+  );
+  if (outcome instanceof Error) return outcome;
+  return { ...outcome, models: outcome.status === 200 ? parseModelList(outcome.body) : [] };
 }
 
 interface Outcome {
@@ -175,6 +232,7 @@ export async function testRouter(router: Router, options: TestOptions): Promise<
   };
 
   let model: string | undefined = options.model;
+  let discovered: readonly DiscoveredModel[] | undefined;
   const report = (ok: boolean, extra: { latencyMs?: number; status?: number; reason?: FailureReason } = {}): TestReport => ({
     routerId: router.id,
     routerName: router.name,
@@ -186,6 +244,7 @@ export async function testRouter(router: Router, options: TestOptions): Promise<
     ...(extra.status === undefined ? {} : { status: extra.status }),
     ...(extra.reason === undefined ? {} : { reason: extra.reason }),
     ...(model === undefined ? {} : { model }),
+    ...(discovered === undefined ? {} : { models: discovered }),
   });
 
   /** Fills the rows after `from` with "skip", so the checklist always has five. */
@@ -222,8 +281,14 @@ export async function testRouter(router: Router, options: TestOptions): Promise<
   const send = (target: string, init: RequestInit): Promise<Outcome | Error> =>
     request(fetchImpl, target, { ...init, headers: { ...headers, ...(init.headers as Record<string, string>) } }, timeoutMs);
 
-  // 2+3 ── one model listing answers "reachable" and "is the credential good"
-  const listing = await send(joinUrl(url.value.url, MODELS_PATH), { method: 'GET' });
+  // 2+3 ── one model listing answers "reachable", "is the credential good" and
+  // "what does this gateway serve" — the same request the Models screen refreshes
+  // with, so discovery is never a second implementation.
+  const listing = await fetchModels(router, {
+    apiKey: options.apiKey,
+    timeoutMs,
+    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+  });
   if (listing instanceof Error) {
     const timedOut = listing.name === 'AbortError' || listing.name === 'TimeoutError';
     push({ key: 'reachable', label: 'Network reachable', status: 'fail', detail: describeNetworkError(listing, timeoutMs) });
@@ -256,7 +321,8 @@ export async function testRouter(router: Router, options: TestOptions): Promise<
   }
 
   // A gateway need not implement the listing; the chat probe below still judges it.
-  const available = listing.status === 200 ? listedModels(listing.body) : [];
+  if (listing.status === 200) discovered = listing.models;
+  const available = listing.models.map((entry) => entry.id);
   push({
     key: 'auth',
     label: 'Authentication accepted',

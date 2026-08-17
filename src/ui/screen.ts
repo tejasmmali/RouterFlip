@@ -91,6 +91,10 @@ class AltScreen {
   /** Depth of inline views drawing into the frame; the paint loop yields to them. */
   #inline = 0;
 
+  get isOpen(): boolean {
+    return this.#open;
+  }
+
   enter(): void {
     if (this.#open) return;
     this.#open = true;
@@ -140,6 +144,20 @@ class AltScreen {
     this.#open = false;
     process.stdout.write(`${CURSOR_SHOW}${ALT_SCREEN_EXIT}`);
   }
+}
+
+/**
+ * How many rows a view drawing into the frame may use, or `undefined` when no
+ * full-screen frame is open.
+ *
+ * A page has a bottom only inside the frame: typed straight into a shell, a
+ * prompt scrolls with everything else and padding it to the terminal height
+ * would leave a hole. `paint` covers rows 1..height-1 and leaves the last row
+ * clear, so an inline view gets exactly the same rows the dashboard uses — which
+ * is what puts its key bar on the same line as the dashboard's.
+ */
+export function frameRows(): number | undefined {
+  return owner?.isOpen === true ? viewport().height - 1 : undefined;
 }
 
 /**

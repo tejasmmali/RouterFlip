@@ -96,3 +96,47 @@ export function table(columns: readonly TableColumn[], rows: readonly (readonly 
 export function paragraph(text: string, width: number, indent = 2): string[] {
   return wrapText(text, Math.max(20, width - indent * 2)).map((line) => ' '.repeat(indent) + line);
 }
+
+/**
+ * The slice of `blocks` that fits in `room` rows, centred on `focus`, with the
+ * `N more above` / `N more below` markers the dashboard's lists use.
+ *
+ * One block is one list entry — one row, or two when the entry has a detail line —
+ * and blocks are kept whole, so a wrapped entry is never cut in half. The window is
+ * derived from `focus` rather than kept as scroll state, so a resize can never
+ * desynchronise it.
+ */
+export function windowBlocks(blocks: readonly (readonly string[])[], focus: number, room: number): string[] {
+  const t = theme();
+  const flatten = (from: number, to: number): string[] => blocks.slice(from, to).flatMap((block) => [...block]);
+  const total = blocks.reduce((sum, block) => sum + block.length, 0);
+  if (total <= room) return flatten(0, blocks.length);
+
+  // Both markers are budgeted for up front: at most one row of slack, against the
+  // alternative of a two-pass fit for a line the caller pads over anyway.
+  const budget = Math.max(1, room - 2);
+  let first = Math.max(0, Math.min(focus, blocks.length - 1));
+  let last = first;
+  let used = blocks[first]?.length ?? 0;
+  // Grow downwards and upwards in turn, which lands the cursor mid-window the way
+  // the dashboard's index arithmetic does for its fixed-height rows.
+  for (let turn = 0; ; turn += 1) {
+    const down = last + 1 < blocks.length ? (blocks[last + 1]?.length ?? 0) : undefined;
+    const up = first > 0 ? (blocks[first - 1]?.length ?? 0) : undefined;
+    const goDown = down !== undefined && used + down <= budget;
+    const goUp = up !== undefined && used + up <= budget;
+    if (goDown && (turn % 2 === 0 || !goUp)) {
+      used += down ?? 0;
+      last += 1;
+    } else if (goUp) {
+      used += up ?? 0;
+      first -= 1;
+    } else break;
+  }
+
+  const out = flatten(first, last + 1);
+  if (first > 0) out.unshift(`  ${t.dim(`${first} more above`)}`);
+  const below = blocks.length - 1 - last;
+  if (below > 0) out.push(`  ${t.dim(`${below} more below`)}`);
+  return out;
+}

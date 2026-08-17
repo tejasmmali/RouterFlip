@@ -12,9 +12,11 @@
  *     never leaves debris behind.
  */
 import { CLEAR_LINE, CLEAR_TO_END, CSI, CURSOR_HIDE, CURSOR_SHOW } from './ansi.ts';
+import { windowBlocks } from './box.ts';
 import { glyphs } from './icons.ts';
 import { openInput, requireInteractive } from './input.ts';
 import { isInterrupt, isShortcut, type Key } from './keys.ts';
+import { frameRows } from './screen.ts';
 import { theme } from './theme.ts';
 import { displayWidth, terminalWidth, truncate, wrapText } from './width.ts';
 import { CancelledError } from '../errors.ts';
@@ -124,6 +126,20 @@ export interface SelectPromptOptions<T> {
   readonly details?: readonly string[];
   /** Extra keys that resolve the prompt, shown in `help` rather than as rows. */
   readonly hotkeys?: readonly SelectHotkey<T>[];
+  /**
+   * Type-to-filter, for a list too long to scan — a gateway can serve dozens of
+   * models. Printable keys become the filter, so row shortcuts and hotkeys are
+   * off while it is on: `b` is a letter in a model name before it is "Back".
+   */
+  readonly search?: boolean;
+  /**
+   * Makes this prompt a page of the full-screen frame: the value is how many rows
+   * the caller already drew above it (its banner), and the list is then windowed
+   * and the footer padded down so the help line sits on the frame's bottom row —
+   * the same row every full-screen screen puts its key bar on. Ignored outside a
+   * frame, where a prompt scrolls with the shell and has no bottom row.
+   */
+  readonly rowsAbove?: number;
 }
 
 export async function select<T>(options: SelectPromptOptions<T>): Promise<T> {
@@ -132,35 +148,84 @@ export async function select<T>(options: SelectPromptOptions<T>): Promise<T> {
   const items = options.options;
   if (items.length === 0) throw new CancelledError('Nothing to choose from.');
 
+  let query = '';
+  let shown: readonly SelectOption<T>[] = items;
   let cursor = Math.max(0, Math.min(options.initial ?? 0, items.length - 1));
-  while (items[cursor]?.disabled && cursor < items.length - 1) cursor += 1;
+  while (shown[cursor]?.disabled && cursor < shown.length - 1) cursor += 1;
 
   const move = (delta: number) => {
-    for (let step = 0; step < items.length; step += 1) {
-      cursor = (cursor + delta + items.length) % items.length;
-      if (!items[cursor]?.disabled) return;
+    for (let step = 0; step < shown.length; step += 1) {
+      cursor = (cursor + delta + shown.length) % shown.length;
+      if (!shown[cursor]?.disabled) return;
     }
   };
 
+  /** Re-applies the filter and puts the cursor on the first match. */
+  const refilter = (): void => {
+    const needle = query.trim().toLowerCase();
+    shown =
+      needle.length === 0
+        ? items
+        : items.filter((item) => `${item.label} ${item.hint ?? ''} ${item.detail ?? ''}`.toLowerCase().includes(needle));
+    cursor = 0;
+    while (shown[cursor]?.disabled && cursor < shown.length - 1) cursor += 1;
+  };
+
+  /** Filter keystrokes. Returns false for anything that is not one. */
+  const edit = (key: Key): boolean => {
+    if (key.name === 'char' && !key.ctrl && !key.meta) query += key.char;
+    else if (key.name === 'space') query += ' ';
+    else if (key.name === 'backspace') {
+      if (query.length === 0) return false;
+      query = query.slice(0, -1);
+    } else return false;
+    refilter();
+    return true;
+  };
+
   const render = (): string[] => {
-    const out = [t.bold(options.message), ''];
-    if (options.details && options.details.length > 0) out.push(...options.details, '');
-    items.forEach((item, index) => {
+    const head = [t.bold(options.message), ''];
+    if (options.details && options.details.length > 0) head.push(...options.details, '');
+    if (options.search) {
+      head.push(`  ${t.muted('Filter')}  ${query.length > 0 ? t.text(query) : t.dim('type to filter')}`, '');
+    }
+    // One block per row, so windowing can keep a label and its detail together.
+    const blocks: string[][] = shown.map((item, index) => {
       const focused = index === cursor;
       const pointer = focused ? t.accent(g.pointer) : ' ';
       const label = item.disabled ? t.dim(item.label) : focused ? t.selection(item.label) : item.label;
       const hint = item.hint ? ` ${t.dim(item.hint)}` : '';
-      out.push(`  ${pointer} ${label}${hint}`);
-      if (item.detail) out.push(`      ${t.dim(item.detail)}`);
+      const rows = [`  ${pointer} ${label}${hint}`];
+      if (item.detail) rows.push(`      ${t.dim(item.detail)}`);
+      return rows;
     });
+    const empty = [`  ${t.dim('Nothing matches that.')}`];
     const help = options.help ?? `${g.arrowRight} Enter select   Esc cancel`;
-    if (help.length > 0) out.push('', `  ${t.dim(help)}`);
-    return out;
+    // A plain sentence is dimmed to secondary text; a line that already carries
+    // colour — the shared keybar does — is drawn as it was built, because dimming
+    // it would wash the accented keys out and make this footer look like no other.
+    const foot = help.length > 0 ? ['', `  ${t.strip(help) === help ? t.dim(help) : help}`] : [];
+
+    // Inside a full-screen frame this prompt *is* the page: the list is windowed to
+    // what fits and the gap below it is padded, so the help bar lands on the same
+    // bottom row as the dashboard's. Typed into a shell there is no bottom row to
+    // reach, and the prompt scrolls with everything else as it always has.
+    const frame = frameRows();
+    if (frame === undefined || options.rowsAbove === undefined) {
+      return [...head, ...(shown.length === 0 ? empty : blocks.flat()), ...foot];
+    }
+    const room = Math.max(1, frame - options.rowsAbove - head.length - foot.length);
+    const body = shown.length === 0 ? empty : windowBlocks(blocks, cursor, room);
+    while (body.length < room) body.push('');
+    return [...head, ...body, ...foot];
   };
 
   return runLoop<T>({
     render,
     onKey: (key) => {
+      // Before the k/j shortcuts: both are letters, and a filter has to be able to
+      // spell "haiku".
+      if (options.search && edit(key)) return { done: false };
       if (key.name === 'up' || isShortcut(key, 'k')) {
         move(-1);
         return { done: false };
@@ -174,18 +239,26 @@ export async function select<T>(options: SelectPromptOptions<T>): Promise<T> {
         return { done: false };
       }
       if (key.name === 'end') {
-        cursor = items.length - 1;
+        cursor = shown.length - 1;
         return { done: false };
       }
-      if (key.name === 'escape') throw new CancelledError();
+      if (key.name === 'escape') {
+        // Esc backs out of the filter first, so a mistyped query is not a cancel.
+        if (query.length > 0) {
+          query = '';
+          refilter();
+          return { done: false };
+        }
+        throw new CancelledError();
+      }
       if (key.name === 'enter') {
-        const item = items[cursor];
+        const item = shown[cursor];
         if (!item || item.disabled) return { done: false };
         return { done: true, value: item.value };
       }
-      const shortcutIndex = items.findIndex((item) => item.shortcut && isShortcut(key, item.shortcut));
+      const shortcutIndex = shown.findIndex((item) => item.shortcut && isShortcut(key, item.shortcut));
       if (shortcutIndex >= 0) {
-        const item = items[shortcutIndex];
+        const item = shown[shortcutIndex];
         if (item && !item.disabled) return { done: true, value: item.value };
       }
       // Last, so a row's own shortcut always wins over a screen-level hotkey.

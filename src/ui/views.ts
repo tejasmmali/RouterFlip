@@ -24,10 +24,19 @@ function arrowsGlyph(): string {
   return theme().unicode ? '↑↓' : 'Up/Dn';
 }
 
+/**
+ * The bottom command bar every interactive screen ends with: accented key,
+ * muted label, two spaces between pairs. One builder, so no screen can drift
+ * into a footer of its own — a new screen gets the look by listing its keys.
+ */
+function keyHints(entries: readonly (readonly [string, string])[]): string {
+  const t = theme();
+  return entries.map(([key, label]) => `${t.accent(key)} ${t.muted(label)}`).join('  ');
+}
+
 /** The dashboard's key hints, in the order the spec lists them. */
 export function keybar(): string {
-  const t = theme();
-  const entries: readonly (readonly [string, string])[] = [
+  return keyHints([
     [arrowsGlyph(), 'Navigate'],
     ['Enter', 'Select'],
     ['A', 'Add'],
@@ -36,8 +45,7 @@ export function keybar(): string {
     ['T', 'Test'],
     ['C', 'Current'],
     ['Q', 'Quit'],
-  ];
-  return entries.map(([key, label]) => `${t.accent(key)} ${t.muted(label)}`).join('  ');
+  ]);
 }
 
 /** Status marker for a router row: filled dot for active, hollow otherwise. */
@@ -65,7 +73,13 @@ export function routerRow(view: RouterView, focused: boolean): string[] {
   if (view.accountCount === 0) tags.push(t.warning('no accounts'));
   else if (!view.hasKey) tags.push(t.warning('no key'));
   const suffix = tags.length > 0 ? `  ${t.dim('[')}${tags.join(t.dim(', '))}${t.dim(']')}` : '';
-  const count = view.accountCount > 1 ? `    ${t.dim(`${view.accountCount} accounts`)}` : '';
+  // What the router offers, in the order it is asked about: how many models it
+  // serves, then how many credentials it holds. Both are omitted when there is
+  // nothing to say, so a single-account router with no models keeps its old shape.
+  const facts: string[] = [];
+  if (view.models.length > 0) facts.push(`${view.models.length} model${view.models.length === 1 ? '' : 's'}`);
+  if (view.accountCount > 1) facts.push(`${view.accountCount} accounts`);
+  const count = facts.length > 0 ? `    ${t.dim(facts.join(' · '))}` : '';
   // Which account is selected only matters when there is a choice to be made. The
   // model is shown whenever one is chosen, because it changes what a launch does —
   // and a router that has never chosen one keeps exactly its old single-line shape.
@@ -137,7 +151,7 @@ export function routerDetailLines(view: RouterView, indent = 2): string[] {
   if (view.description) out.push('', ...field('Description', view.description));
   // Only mentioned once models are in play: a router that has never offered one
   // launches with the provider's own default, and saying so every time is noise.
-  if (view.model) out.push('', ...field('Model', t.text(view.model)));
+  if (view.model) out.push('', ...field('Model', t.text(view.modelLabel ?? view.model)));
   else if (view.models.length > 0) out.push('', ...field('Model', t.dim('none selected')));
   out.push('', ...field('Auth variable', t.dim(view.authEnvVar)));
   return out;
@@ -172,8 +186,7 @@ export function accountBannerLines(view: RouterView, width: number): string[] {
 
 /** The account screen's key hints. `B` goes back rather than quitting. */
 export function accountKeybar(): string {
-  const t = theme();
-  const entries: readonly (readonly [string, string])[] = [
+  return keyHints([
     [arrowsGlyph(), 'Navigate'],
     ['Enter', 'Select'],
     ['A', 'Add Account'],
@@ -181,8 +194,33 @@ export function accountKeybar(): string {
     ['D', 'Delete'],
     ['M', 'Model'],
     ['B', 'Back'],
-  ];
-  return entries.map(([key, label]) => `${t.accent(key)} ${t.muted(label)}`).join('  ');
+  ]);
+}
+
+/**
+ * The model picker's key hints.
+ *
+ * `filtering` is the long-list mode, where every printable key types into the
+ * filter box: the letter shortcuts genuinely do not fire there, so promising
+ * them would be a lie. The rows themselves stay, so nothing becomes unreachable,
+ * and the picker's own `Filter` line already says that typing filters.
+ */
+export function modelKeybar(filtering = false): string {
+  if (filtering) {
+    return keyHints([
+      [arrowsGlyph(), 'Navigate'],
+      ['Enter', 'Select'],
+      ['Esc', 'Cancel'],
+    ]);
+  }
+  return keyHints([
+    [arrowsGlyph(), 'Navigate'],
+    ['Enter', 'Select'],
+    ['R', 'Refresh Models'],
+    ['A', 'Add Custom Model'],
+    ['B', 'Back'],
+    ['Esc', 'Cancel'],
+  ]);
 }
 
 /**

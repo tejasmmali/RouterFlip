@@ -21,8 +21,11 @@ import {
   credentialRefsOf,
   findAccount,
   findModel,
+  mergeModels,
+  modelLabel,
   nextAccountIdentity,
   withModel,
+  type DiscoveredModel,
 } from './accounts.ts';
 import { credentialRefFor, normalizeName, nowIso, sameName, uniqueId } from './id.ts';
 import { maskSecret } from './mask.ts';
@@ -105,6 +108,8 @@ export interface RouterView {
   readonly models: readonly string[];
   /** Model the *selected* account would launch with, if it has chosen one. */
   readonly model?: string;
+  /** That model as a human reads it — the gateway's label when it gave one. */
+  readonly modelLabel?: string;
   readonly authEnvVar: AuthEnvVar;
   readonly provider: ProviderId;
   readonly isActive: boolean;
@@ -215,8 +220,10 @@ export class RouterService {
       accounts: [account],
       activeAccount: account.id,
       // No models are assumed: choosing one is optional, and a router starts out
-      // launching with whatever default the provider already has.
+      // launching with whatever default the provider already has. The first `test`
+      // fills the list from the gateway's own listing.
       models: [],
+      modelNames: {},
       description: (input.description ?? '').trim(),
       provider: input.provider ?? 'claude-code',
       authEnvVar: input.authEnvVar ?? 'ANTHROPIC_API_KEY',
@@ -348,7 +355,7 @@ export class RouterService {
       accountCount: router.accounts.length,
       ...(selected ? { activeAccountId: selected.id, activeAccountName: selected.name } : {}),
       models: router.models,
-      ...(selected?.model ? { model: selected.model } : {}),
+      ...(selected?.model ? { model: selected.model, modelLabel: modelLabel(router, selected.model) } : {}),
       authEnvVar: router.authEnvVar,
       provider: router.provider,
       isActive: this.#config.activeRouter === router.id,
@@ -604,6 +611,32 @@ export class RouterService {
     return { router: updated, model };
   }
 
+  /**
+   * Stores what a gateway just said it serves.
+   *
+   * Called after every health check and by `models … refresh`, which is why it has
+   * to be idempotent: an unchanged listing must not rewrite config.json, or `test`
+   * would bump `updatedAt` on every run. Merging (and the promise never to delete a
+   * model the user added) lives in `mergeModels`.
+   */
+  syncModels(
+    routerId: string,
+    discovered: readonly DiscoveredModel[],
+  ): { readonly router: Router; readonly models: readonly string[]; readonly changed: boolean } {
+    const router = this.resolve(routerId);
+    const merged = mergeModels(router, discovered);
+    const same =
+      merged.models.length === router.models.length &&
+      merged.models.every((model, index) => model === router.models[index]) &&
+      JSON.stringify(merged.modelNames) === JSON.stringify(router.modelNames);
+    if (same) return { router, models: router.models, changed: false };
+
+    this.#writeRouter({ ...router, models: merged.models, modelNames: merged.modelNames, updatedAt: nowIso() });
+    const updated = this.resolve(router.id);
+    logger.debug(`models synced: ${updated.id} → ${updated.models.length}`);
+    return { router: updated, models: updated.models, changed: true };
+  }
+
   /** Removes a model from the router's list and from every account that chose it. */
   removeModel(routerId: string, name: string): { readonly router: Router; readonly model: string } {
     const router = this.resolve(routerId);
@@ -612,6 +645,7 @@ export class RouterService {
     this.#writeRouter({
       ...router,
       models: router.models.filter((entry) => entry !== model),
+      modelNames: Object.fromEntries(Object.entries(router.modelNames).filter(([id]) => id !== model)),
       // An account must never be left remembering a model the router no longer
       // offers: it would launch with something the picker cannot show.
       accounts: router.accounts.map((account) => {
