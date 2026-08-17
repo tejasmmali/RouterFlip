@@ -36,3 +36,5 @@ coverage/
 tmp/
 .tmp/
 /tests/
+
+.claude/

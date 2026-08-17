@@ -1,22 +1,33 @@
 /**
- * `routerflip test [name]` — the four-step connection checklist of spec §8.
+ * `routerflip test [name]` — the connection checklist of spec §8.
  *
  * The steps are rendered live while they run, and the whole thing is a *report*
- * rather than an exception: a gateway that refuses the key still prints four rows
- * so the user can see how far it got. The endpoint is configurable (`--path`,
- * `router.testPath`, then the config default) because nothing here should assume
- * a particular API surface.
+ * rather than an exception: a gateway that refuses the key still prints every row
+ * so the user can see how far it got. The router's own account and model are what
+ * get tested — the check must exercise the configuration a launch would use, not a
+ * model of its own choosing.
  */
 import type { AppContext } from '../context.ts';
 import type { Account, Router } from '../core/schema.ts';
 import { json, blank, failure, line, note, success, warning } from '../ui/output.ts';
 import { StepList, type StepState } from '../ui/spinner.ts';
 import { theme } from '../ui/theme.ts';
-import { endpointFor, testRouter, type FetchLike, type StepStatus, type TestReport } from '../services/tester.ts';
+import { endpointFor, testRouter, type FailureReason, type FetchLike, type StepStatus, type TestReport } from '../services/tester.ts';
 import { accountArg, pickRouter, type CommandResult } from './shared.ts';
 
-const STEP_ORDER = ['url', 'reachable', 'endpoint', 'auth'] as const;
-const STEP_LABELS = ['URL format', 'Network reachable', 'Endpoint responding', 'Authentication accepted'] as const;
+const STEP_ORDER = ['url', 'reachable', 'auth', 'endpoint', 'model'] as const;
+const STEP_LABELS = ['URL format', 'Network reachable', 'Authentication accepted', 'Endpoint responding', 'Model available'] as const;
+
+/** One-line verdict per failure kind, as asked for in the bug report. */
+const VERDICTS: Readonly<Record<FailureReason, string>> = {
+  url: 'Invalid base URL',
+  connection: 'Connection failed',
+  timeout: 'Timeout',
+  auth: 'Authentication failed',
+  'not-found': 'Endpoint not found',
+  gateway: 'Gateway error',
+  model: 'Model unavailable',
+};
 
 function stateFor(status: StepStatus): StepState {
   if (status === 'pass') return 'ok';
@@ -37,6 +48,9 @@ export interface RunTestOptions {
 /** Runs the checklist for one router and prints it. Returns the report. */
 export async function runTest(ctx: AppContext, router: Router, options: RunTestOptions = {}): Promise<TestReport> {
   const apiKey = await ctx.service.apiKey(router, options.account);
+  // The configuration a launch would use: this account's model, else the router's
+  // first. Nothing is guessed here — the tester borrows one the gateway lists.
+  const model = ctx.service.modelOf(router, options.account) ?? router.models[0];
   const live = ctx.json || options.silent ? undefined : new StepList([...STEP_LABELS]);
 
   if (live) {
@@ -51,6 +65,7 @@ export async function runTest(ctx: AppContext, router: Router, options: RunTestO
     apiKey,
     ...pathOptions(ctx),
     ...timeoutOptions(ctx),
+    ...(model ? { model } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     ...(live
       ? {
@@ -88,10 +103,10 @@ function printSummary(report: TestReport): void {
   const latency = report.latencyMs === undefined ? '' : ` ${t.dim(`(${report.latencyMs}ms)`)}`;
   if (report.ok) {
     const warned = report.steps.some((step) => step.status === 'warn');
-    if (warned) warning(`${report.routerName} works, with warnings.${latency}`);
-    else success(`${report.routerName} is ready to use.${latency}`);
+    if (warned) warning(`${report.routerName}: healthy, with warnings.${latency}`);
+    else success(`${report.routerName}: healthy.${latency}`);
   } else {
-    failure(`${report.routerName} is not usable yet.`);
+    failure(`${report.routerName}: ${report.reason ? VERDICTS[report.reason] : 'not usable yet'}.`);
     const failed = report.steps.find((step) => step.status === 'fail' || step.status === 'warn');
     if (failed?.detail) note(`  ${failed.detail}`);
   }
@@ -104,6 +119,9 @@ function reportJson(report: TestReport): Record<string, unknown> {
     baseUrl: report.baseUrl,
     endpoint: report.endpoint,
     ok: report.ok,
+    verdict: report.ok ? 'Healthy' : report.reason ? VERDICTS[report.reason] : 'Failed',
+    ...(report.reason === undefined ? {} : { reason: report.reason }),
+    ...(report.model === undefined ? {} : { model: report.model }),
     ...(report.status === undefined ? {} : { status: report.status }),
     ...(report.latencyMs === undefined ? {} : { latencyMs: report.latencyMs }),
     steps: report.steps.map((step) => ({

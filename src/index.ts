@@ -42,5 +42,5 @@ export type { Provider, ApplyResult, ClearResult, PermanentStrategy } from './pr
 
 export { applyPermanent, clearPermanent, currentActivation } from './services/activation.ts';
 export { launchRouter, buildChildEnv, type LaunchResult } from './services/launcher.ts';
-export { testRouter, endpointFor, type TestReport, type TestStep } from './services/tester.ts';
+export { testRouter, endpointFor, type TestReport, type TestStep, type FailureReason } from './services/tester.ts';
 export { runDoctor, type DoctorReport, type Check } from './services/doctor.ts';
